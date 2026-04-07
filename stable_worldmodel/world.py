@@ -960,6 +960,7 @@ class World:
 
         # run normal evaluation for eval_budget and record video
         for i in range(eval_budget):
+            # print("[stable_worldmodel/world.py] self.infos['pixels'][:, -1].shape: ", self.infos['pixels'][:, -1].shape)
             video_frames[:, i] = self.infos['pixels'][:, -1]
             self.infos.update(deepcopy(goal_step))
             self.step()

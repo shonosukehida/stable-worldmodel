@@ -241,7 +241,16 @@ class EverythingToInfoWrapper(gym.Wrapper):
         else:
             _obs = obs
 
+
         for key, val in _obs.items():
+            if key == "pixels": #pixels は弾く
+                continue  
+            
+            if key in info:
+                print("COLLISION KEY:", key)
+                print("INFO KEYS:", list(info.keys()))
+                # print("OPTION KEYS:", list(options.keys()) if isinstance(options, dict) else options)
+                raise AssertionError(f"Key collision: {key}")
             assert key not in info
             info[key] = val
 
@@ -305,7 +314,13 @@ class EverythingToInfoWrapper(gym.Wrapper):
         else:
             _obs = obs
         for key, val in _obs.items():
-            assert key not in info
+            if key == "pixels":
+                continue
+            
+            if key in info:
+                print("STEP COLLISION KEY:", key)
+                print("STEP INFO KEYS:", list(info.keys()))
+                raise AssertionError(f"Step key collision: {key}")
             info[key] = val
         assert 'reward' not in info
         info['reward'] = reward

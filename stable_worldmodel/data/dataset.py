@@ -146,6 +146,7 @@ class HDF5Dataset(Dataset):
 
         if keys_to_merge:
             for target, source in keys_to_merge.items():
+                print("target:", target, "source:", source)
                 self.merge_col(source, target)
 
     @property
