@@ -25,6 +25,8 @@ from stable_worldmodel.policy import Policy
 
 from .wrapper import MegaWrapper, SyncWorld, VariationWrapper
 
+from stable_worldmodel.plot.plot import plot_task_result_xy
+
 
 def _make_env(env_name, max_episode_steps, wrappers, **kwargs):
     """Create a gymnasium environment with specified wrappers.
@@ -108,8 +110,12 @@ class World:
             _make_env, env_name, max_episode_steps, wrappers, **kwargs
         )
         env_fns = [env_fn for _ in range(num_envs)]
+        # print("self.envs:", env_fns[0])
         self.envs: VectorEnv = VariationWrapper(SyncWorld(env_fns))
         self.envs.unwrapped.autoreset_mode = gym.vector.AutoresetMode.DISABLED
+        
+        # print("type(self.envs):", type(self.envs))
+        
 
         self._history_size = history_size
         self.policy: Policy | None = None
@@ -201,6 +207,7 @@ class World:
             seed: Random seed(s) for the environments.
             options: Additional options passed to the environment reset.
         """
+        
         self.states, self.infos = self.envs.reset(seed=seed, options=options)
 
     def set_policy(self, policy: Policy) -> None:
@@ -805,14 +812,20 @@ class World:
                 'Number of episodes to evaluate must match number of envs'
             )
 
+        print("")
         data = dataset.load_chunk(ep_idx_arr, start_steps_arr, end_steps)
         columns = dataset.column_names
+        # print("columns:", columns) #['action','bluebox_pos','ee_pos','ep_idx','pixels','qpos','qvel','step_idx']
 
         # keep relevant part of the chunk
         init_step_per_env: dict[str, list[Any]] = defaultdict(list)
         goal_step_per_env: dict[str, list[Any]] = defaultdict(list)
 
         for i, ep in enumerate(data):
+            # print("ep[action].shape:", ep["action"].shape) #[26, 7]
+            # print("ep[pixels].shape:", ep["pixels"].shape) #[26, 3, 64, 64]
+            
+            
             for col in columns:
                 if col.startswith('goal'):
                     continue
@@ -953,24 +966,11 @@ class World:
             )
 
         target_frames = torch.stack([ep['pixels'] for ep in data]).numpy()
-        video_frames = np.empty(
-            (self.num_envs, eval_budget, *self.infos['pixels'].shape[-3:]),
-            dtype=np.uint8,
+        video_frames = self._run_evaluation_rollout(
+            goal_step=goal_step,
+            eval_budget=eval_budget,
+            results=results,
         )
-
-        # run normal evaluation for eval_budget and record video
-        for i in range(eval_budget):
-            # print("[stable_worldmodel/world.py] self.infos['pixels'][:, -1].shape: ", self.infos['pixels'][:, -1].shape)
-            video_frames[:, i] = self.infos['pixels'][:, -1]
-            self.infos.update(deepcopy(goal_step))
-            self.step()
-            results['episode_successes'] = np.logical_or(
-                results['episode_successes'], self.terminateds
-            )
-            # for auto-reset
-            self.envs.unwrapped._autoreset_envs = np.zeros((self.num_envs,))
-
-        video_frames[:, -1] = self.infos['pixels'][:, -1]
 
         n_episodes = len(episodes_idx)
 
@@ -981,26 +981,11 @@ class World:
 
         # save video if required
         if save_video:
-            import imageio
-
-            target_len = target_frames.shape[1]
-            video_path_obj = Path(video_path)
-            video_path_obj.mkdir(parents=True, exist_ok=True)
-            for i in range(self.num_envs):
-                out = imageio.get_writer(
-                    video_path_obj / f'rollout_{i}.mp4',
-                    fps=15,
-                    codec='libx264',
-                )
-                goals = np.vstack([target_frames[i, -1], target_frames[i, -1]])
-                for t in range(eval_budget):
-                    stacked_frame = np.vstack(
-                        [video_frames[i, t], target_frames[i, t % target_len]]
-                    )
-                    frame = np.hstack([stacked_frame, goals])
-                    out.append_data(frame)
-                out.close()
-            print(f'Video saved to {video_path_obj}')
+            self._save_evaluation_videos(
+                video_frames=video_frames,
+                target_frames=target_frames,
+                video_path=video_path,
+            )
 
         if results['seeds'] is not None:
             assert np.unique(results['seeds']).shape[0] == n_episodes, (
@@ -1008,3 +993,391 @@ class World:
             )
 
         return results
+
+    def evaluate_zeroshot(
+        self,
+        start_positions: Sequence[Any],
+        goal_positions: Sequence[Any],
+        init_ee_poses: Sequence[Any],
+        eval_budget: int,
+        start_option_name: str = 'state',
+        goal_option_name: str = 'target_state',
+        init_ee_option_name: str = 'init_ee_pos',
+        start_info_name: str | None = 'state',
+        goal_info_name: str | None = 'goal_state',
+        seeds: int | Sequence[int | None] | None = None,
+        reset_options: Sequence[dict[str, Any] | None] | None = None,
+        callables: list[dict[str, Any]] | None = None,
+        save_video: bool = True,
+        video_path: str | Path = './',
+    ) -> dict:
+        """Evaluate the policy from manually specified start and goal positions.
+
+        This is a dataset-free counterpart to ``evaluate_from_dataset``.
+        The start and goal values are injected through each environment's
+        ``reset(options=...)`` and the resulting goal observations are then
+        kept fixed during the rollout.
+
+        Args:
+            start_positions: Per-environment start positions/states.
+            goal_positions: Per-environment goal positions/states.
+            eval_budget: Maximum steps allowed for the agent to reach the goal.
+            start_option_name: Reset option name used for the initial state.
+            goal_option_name: Reset option name used for the goal state.
+            start_info_name: Info key to overwrite with ``start_positions``.
+            goal_info_name: Info key to overwrite with ``goal_positions``.
+            seeds: Optional seed or per-environment seeds for reset.
+            reset_options: Additional reset options for each environment.
+            callables: Optional list of per-env method calls, following the
+                same schema as ``evaluate_from_dataset``.
+            save_video: Whether to save rollout videos.
+            video_path: Path to save videos.
+
+        Returns:
+            Dictionary containing success rates and other metrics.
+        """
+        start_arr = np.asarray(start_positions)
+        goal_arr = np.asarray(goal_positions)
+        init_ee_arr = np.asarray(init_ee_poses)
+
+        if start_arr.ndim == 0 or goal_arr.ndim == 0:
+            raise ValueError('start_positions and goal_positions must be arrays')
+
+        # Accept either:
+        # - a single state vector, e.g. (state_dim,)
+        # - one state per env, e.g. (num_envs, state_dim)
+        if start_arr.ndim == 1:
+            start_arr = np.broadcast_to(start_arr, (self.num_envs, *start_arr.shape))
+        if goal_arr.ndim == 1:
+            goal_arr = np.broadcast_to(goal_arr, (self.num_envs, *goal_arr.shape))
+
+        if len(start_arr) != len(goal_arr):
+            raise ValueError(
+                'start_positions and goal_positions must have the same length'
+            )
+
+        if len(start_arr) != self.num_envs:
+            raise ValueError(
+                'Number of start/goal positions must match number of envs, '
+                'or provide a single state vector to broadcast to all envs'
+            )
+
+        if reset_options is None:
+            options = [{} for _ in range(self.num_envs)]
+        else:
+            if len(reset_options) != self.num_envs:
+                raise ValueError(
+                    'reset_options length must match number of envs'
+                )
+            options = [
+                deepcopy(opt) if opt is not None else {}
+                for opt in reset_options
+            ]
+
+        for i in range(self.num_envs):
+            options[i][start_option_name] = np.array(start_arr[i], copy=True)
+            options[i][goal_option_name] = np.array(goal_arr[i], copy=True)
+            options[i][init_ee_option_name] = np.array(init_ee_arr[i], copy=True)
+
+        seed_list = self._expand_reset_seeds(seeds)
+        result_seeds = None if seed_list is None else np.array(seed_list)
+
+        self.reset(seed=seeds, options=options)
+
+        callables = callables or []
+        if callables:
+            manual_step = {
+                'start_positions': np.array(start_arr, copy=True),
+                'goal_positions': np.array(goal_arr, copy=True),
+            }
+            if start_info_name is not None:
+                manual_step[start_info_name] = np.array(start_arr, copy=True)
+            if goal_info_name is not None:
+                manual_step[goal_info_name] = np.array(goal_arr, copy=True)
+
+            for i, env in enumerate(self.envs.unwrapped.envs):
+                env_unwrapped = env.unwrapped
+
+                for spec in callables:
+                    method_name = spec['method']
+                    if not hasattr(env_unwrapped, method_name):
+                        logging.warning(
+                            f'Env {env_unwrapped} has no method {method_name}, skipping callable'
+                        )
+                        continue
+
+                    method = getattr(env_unwrapped, method_name)
+                    args = spec.get('args', spec)
+
+                    prepared_args = {}
+                    for args_name, args_data in args.items():
+                        value = args_data.get('value')
+                        in_positions = args_data.get('in_positions', False)
+                        in_dataset = args_data.get('in_dataset', False)
+
+                        if in_positions or in_dataset:
+                            if value not in manual_step:
+                                logging.warning(
+                                    f'Key {value} not found for callable {method_name}, skipping arg'
+                                )
+                                continue
+                            prepared_args[args_name] = deepcopy(
+                                manual_step[value][i]
+                            )
+                        else:
+                            prepared_args[args_name] = args_data.get('value')
+
+                    method(**prepared_args)
+
+        goal_visuals = None
+        if 'goal' not in self.infos:
+            goal_visuals = self._render_goal_observations(
+                goal_positions=goal_arr,
+                base_options=options,
+                seed_list=seed_list,
+                start_option_name=start_option_name,
+                goal_option_name=goal_option_name,
+            )
+            # Restore the intended start states after rendering goal observations.
+            self.reset(seed=seeds, options=options)
+
+        shape_prefix = self.infos['pixels'].shape[:2]
+        if start_info_name is not None:
+            self.infos[start_info_name] = np.broadcast_to(
+                start_arr[:, None, ...], shape_prefix + start_arr.shape[1:]
+            )
+        if goal_info_name is not None:
+            self.infos[goal_info_name] = np.broadcast_to(
+                goal_arr[:, None, ...], shape_prefix + goal_arr.shape[1:]
+            )
+
+        goal_step = {
+            k: deepcopy(v)
+            for k, v in self.infos.items()
+            if k == 'goal' or k.startswith('goal_')
+        }
+        if goal_visuals is not None:
+            goal_step['goal'] = np.broadcast_to(
+                goal_visuals[:, None, ...],
+                shape_prefix + goal_visuals.shape[1:],
+            )
+            self.infos['goal'] = deepcopy(goal_step['goal'])
+        if goal_info_name is not None:
+            goal_step[goal_info_name] = deepcopy(self.infos[goal_info_name])
+
+        results: dict[str, Any] = {
+            'success_rate': 0.0,
+            'episode_successes': np.zeros(self.num_envs),
+            'seeds': result_seeds,
+            'start_positions': np.array(start_arr, copy=True),
+            'goal_positions': np.array(goal_arr, copy=True),
+            'init_ee_poses': np.array(init_ee_arr, copy=True),
+        }
+
+        video_frames, traj = self._run_evaluation_rollout(
+            goal_step=goal_step,
+            eval_budget=eval_budget,
+            results=results,
+            collect_traj=True,
+        )
+        
+        print("[stable_worldmodel/world.py] traj:", traj)
+        
+
+        results["traj_bluebox_pos"] = traj["bluebox_pos"]
+        results["traj_ee_pos"] = traj["ee_pos"]
+        results['success_rate'] = (
+            float(np.sum(results['episode_successes'])) / self.num_envs * 100.0
+        )
+
+        if save_video:
+            target_frames = None
+            if 'goal' in goal_step:
+                target_frames = np.array(goal_step['goal'][:, -1:], copy=True)
+            self._save_evaluation_videos(
+                video_frames=video_frames,
+                target_frames=target_frames,
+                video_path=video_path,
+            )
+        
+        if "traj_bluebox_pos" in results and "traj_ee_pos" in results:
+            plot_dir = Path(video_path) / "task_map"
+            plot_dir.mkdir(parents=True, exist_ok=True)
+
+            for env_idx in range(self.num_envs):
+                plot_task_result_xy(
+                    bluebox_traj=results["traj_bluebox_pos"][env_idx],
+                    ee_traj=results["traj_ee_pos"][env_idx],
+                    goal_pos=results["goal_positions"][env_idx],
+                    save_path=plot_dir / f"task_plot_{env_idx}.png",
+                    title=f"Task Visualization env={env_idx}",
+                )
+
+        return results
+
+    def _expand_reset_seeds(
+        self, seeds: int | Sequence[int | None] | None
+    ) -> list[int | None] | None:
+        """Normalize reset seeds into a per-environment list."""
+        if seeds is None:
+            return None
+        if isinstance(seeds, int):
+            return [seeds + i for i in range(self.num_envs)]
+        if isinstance(seeds, Sequence) and not isinstance(seeds, (str, bytes)):
+            if len(seeds) != self.num_envs:
+                raise ValueError('seeds length must match number of envs')
+            return list(seeds)
+        raise ValueError('Unsupported seeds format')
+
+    def _render_goal_observations(
+        self,
+        goal_positions: np.ndarray,
+        base_options: Sequence[dict[str, Any]],
+        seed_list: Sequence[int | None] | None,
+        start_option_name: str,
+        goal_option_name: str,
+    ) -> np.ndarray:
+        """Render goal observations for envs that do not expose ``info['goal']``.
+
+        Each environment is temporarily reset with its state placed at the goal
+        so that the wrapped ``pixels`` output can be reused as the goal image.
+        """
+        goal_images: list[np.ndarray] = []
+        for i in range(self.num_envs):
+            goal_options = deepcopy(base_options[i])
+            goal_state = np.array(goal_positions[i], copy=True)
+            goal_options[start_option_name] = goal_state
+            goal_options[goal_option_name] = np.array(goal_positions[i], copy=True)
+
+            _, goal_infos = self.envs.envs[i].reset(
+                seed=None if seed_list is None else seed_list[i],
+                options=goal_options,
+            )
+
+            if 'goal' in goal_infos:
+                goal_img = goal_infos['goal']
+            elif 'pixels' in goal_infos:
+                goal_img = goal_infos['pixels']
+            else:
+                raise RuntimeError(
+                    "Unable to infer a goal image: env reset returned neither 'goal' nor 'pixels'."
+                )
+
+            goal_img = np.asarray(goal_img)
+            if goal_img.ndim > 3:
+                goal_img = goal_img[-1]
+            goal_images.append(goal_img)
+
+        return np.stack(goal_images)
+
+
+    def _run_evaluation_rollout(
+        self,
+        goal_step: dict[str, Any],
+        eval_budget: int,
+        results: dict[str, Any],
+        collect_traj: bool = False,
+    ):
+        video_frames = np.empty(
+            (self.num_envs, eval_budget, *self.infos['pixels'].shape[-3:]),
+            dtype=np.uint8,
+        )
+
+        traj = None
+        if collect_traj:
+            traj = {
+                "bluebox_pos": [],
+                "ee_pos": [],
+            }
+
+            # reset直後も記録
+            if "bluebox_pos" in self.infos:
+                blue0 = np.asarray(self.infos["bluebox_pos"])
+                if blue0.ndim > 2:
+                    blue0 = blue0[:, -1]
+                traj["bluebox_pos"].append(blue0.copy())
+
+            if "ee_pos" in self.infos:
+                ee0 = np.asarray(self.infos["ee_pos"])
+                if ee0.ndim > 2:
+                    ee0 = ee0[:, -1]
+                traj["ee_pos"].append(ee0.copy())
+            elif "state" in self.infos:
+                st0 = np.asarray(self.infos["state"])
+                if st0.ndim > 2:
+                    st0 = st0[:, -1]
+                traj["ee_pos"].append(st0[:, -3:].copy())
+
+        for i in range(eval_budget):
+            video_frames[:, i] = self.infos['pixels'][:, -1]
+            self.infos.update(deepcopy(goal_step))
+            self.step()
+
+            results['episode_successes'] = np.logical_or(
+                results['episode_successes'], self.terminateds
+            )
+            self.envs.unwrapped._autoreset_envs = np.zeros((self.num_envs,))
+
+            if collect_traj:
+                if "bluebox_pos" in self.infos:
+                    blue = np.asarray(self.infos["bluebox_pos"])
+                    if blue.ndim > 2:
+                        blue = blue[:, -1]
+                    traj["bluebox_pos"].append(blue.copy())
+
+                if "ee_pos" in self.infos:
+                    ee = np.asarray(self.infos["ee_pos"])
+                    if ee.ndim > 2:
+                        ee = ee[:, -1]
+                    traj["ee_pos"].append(ee.copy())
+                elif "state" in self.infos:
+                    st = np.asarray(self.infos["state"])
+                    if st.ndim > 2:
+                        st = st[:, -1]
+                    traj["ee_pos"].append(st[:, -3:].copy())
+
+        if eval_budget > 0:
+            video_frames[:, -1] = self.infos['pixels'][:, -1]
+
+        if collect_traj:
+            traj = {k: np.stack(v, axis=1) for k, v in traj.items()}
+            # shape: (num_envs, T+1, 3)
+            return video_frames, traj
+
+        return video_frames
+
+
+    def _save_evaluation_videos(
+        self,
+        video_frames: np.ndarray,
+        target_frames: np.ndarray | None,
+        video_path: str | Path,
+    ) -> None:
+        """Save rollout videos with the current frame and target side by side."""
+        import imageio
+
+        if video_frames.shape[1] == 0:
+            logging.warning('No rollout frames to save, skipping video export.')
+            return
+
+        if target_frames is None:
+            target_frames = video_frames[:, -1:, ...]
+
+        target_len = target_frames.shape[1]
+        video_path_obj = Path(video_path)
+        video_path_obj.mkdir(parents=True, exist_ok=True)
+        for i in range(self.num_envs):
+            out = imageio.get_writer(
+                video_path_obj / f'rollout_{i}.mp4',
+                fps=15,
+                codec='libx264',
+            )
+            goals = np.vstack([target_frames[i, -1], target_frames[i, -1]])
+            for t in range(video_frames.shape[1]):
+                stacked_frame = np.vstack(
+                    [video_frames[i, t], target_frames[i, t % target_len]]
+                )
+                frame = np.hstack([stacked_frame, goals])
+                out.append_data(frame)
+            out.close()
+        print(f'Video saved to {video_path_obj}')

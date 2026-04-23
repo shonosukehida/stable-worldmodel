@@ -813,6 +813,7 @@ class SyncWorld(gym.vector.SyncVectorEnv):
         for i, (env, single_seed, single_options) in enumerate(
             zip(self.envs, seed, options_list, strict=True)
         ):
+            # print("type(env):", type(env))
             self._env_obs[i], env_info = env.reset(
                 seed=single_seed, options=single_options
             )
