@@ -168,3 +168,83 @@ def plot_task_result_xy(
         fig.savefig(save_path, bbox_inches="tight")
 
     plt.show()
+    
+
+
+
+def plot_joint_angle_comparison(
+    target_actions,
+    actual_qpos,
+    save_path=None,
+    title="Joint angle comparison",
+    episode_idx=None,
+):
+    """
+    target_actions: (T, 7)
+    actual_qpos:    (T, 7) or (T+1, 7)
+
+    画像のイメージに合わせて、
+    action_t と q_{t+1} を比較したい場合は
+    actual_qpos が T+1 長なら actual_qpos[1:] を使う。
+    """
+    target_actions = np.asarray(target_actions)
+    actual_qpos = np.asarray(actual_qpos)
+
+    if target_actions.ndim != 2 or target_actions.shape[1] != 7:
+        raise ValueError(f"target_actions must be (T, 7), got {target_actions.shape}")
+
+    if actual_qpos.ndim != 2 or actual_qpos.shape[1] != 7:
+        raise ValueError(f"actual_qpos must be (T or T+1, 7), got {actual_qpos.shape}")
+
+    # action_t vs q_{t+1} を比べる
+    if actual_qpos.shape[0] == target_actions.shape[0] + 1:
+        qplot = actual_qpos[1:]
+        xlabel = "timestep (t, comparing a_t vs q_{t+1})"
+    elif actual_qpos.shape[0] == target_actions.shape[0]:
+        qplot = actual_qpos
+        xlabel = "timestep"
+    else:
+        raise ValueError(
+            f"Incompatible lengths: target_actions={target_actions.shape[0]}, "
+            f"actual_qpos={actual_qpos.shape[0]}"
+        )
+
+    T = target_actions.shape[0]
+
+    fig, axes = plt.subplots(7, 1, figsize=(10, 12), sharex=True, dpi=150)
+
+    if episode_idx is None:
+        fig.suptitle(title, fontsize=13)
+    else:
+        fig.suptitle(f"{title} (episode idx={episode_idx})", fontsize=13)
+
+    for j in range(7):
+        ax = axes[j]
+        ax.plot(
+            np.arange(T),
+            target_actions[:, j],
+            label="target (action)" if j == 0 else None,
+            linewidth=1.4,
+        )
+        ax.plot(
+            np.arange(T),
+            qplot[:, j],
+            "--",
+            label="actual (qpos)" if j == 0 else None,
+            linewidth=1.4,
+        )
+        ax.set_ylabel(f"Joint {j+1}")
+        ax.grid(True, alpha=0.3)
+
+        if j == 0:
+            ax.legend(loc="best")
+
+    axes[-1].set_xlabel(xlabel)
+    fig.tight_layout()
+
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, bbox_inches="tight")
+
+    plt.show()

@@ -25,7 +25,7 @@ from stable_worldmodel.policy import Policy
 
 from .wrapper import MegaWrapper, SyncWorld, VariationWrapper
 
-from stable_worldmodel.plot.plot import plot_task_result_xy
+from stable_worldmodel.plot.plot import plot_task_result_xy, plot_joint_angle_comparison
 
 
 def _make_env(env_name, max_episode_steps, wrappers, **kwargs):
@@ -1174,11 +1174,12 @@ class World:
             'init_ee_poses': np.array(init_ee_arr, copy=True),
         }
 
-        video_frames, traj = self._run_evaluation_rollout(
+        video_frames, traj, joint_logs = self._run_evaluation_rollout(
             goal_step=goal_step,
             eval_budget=eval_budget,
             results=results,
             collect_traj=True,
+            collect_joint_logs=True,
         )
         
         print("[stable_worldmodel/world.py] traj:", traj)
@@ -1186,6 +1187,8 @@ class World:
 
         results["traj_bluebox_pos"] = traj["bluebox_pos"]
         results["traj_ee_pos"] = traj["ee_pos"]
+        results["traj_target_action"] = joint_logs["target_action"]
+        results["traj_actual_qpos"] = joint_logs["actual_qpos"]
         results['success_rate'] = (
             float(np.sum(results['episode_successes'])) / self.num_envs * 100.0
         )
@@ -1211,6 +1214,19 @@ class World:
                     goal_pos=results["goal_positions"][env_idx],
                     save_path=plot_dir / f"task_plot_{env_idx}.png",
                     title=f"Task Visualization env={env_idx}",
+                )
+                
+        if "traj_target_action" in results and "traj_actual_qpos" in results:
+            joint_plot_dir = Path(video_path) / "joint_angle"
+            joint_plot_dir.mkdir(parents=True, exist_ok=True)
+
+            for env_idx in range(self.num_envs):
+                plot_joint_angle_comparison(
+                    target_actions=results["traj_target_action"][env_idx],   # (T, 7)
+                    actual_qpos=results["traj_actual_qpos"][env_idx],       # (T+1, 7)
+                    save_path=joint_plot_dir / f"joint_angle_env_{env_idx}.png",
+                    title="Joint angle comparison",
+                    episode_idx=env_idx,
                 )
 
         return results
@@ -1277,6 +1293,7 @@ class World:
         eval_budget: int,
         results: dict[str, Any],
         collect_traj: bool = False,
+        collect_joint_logs: bool = False,
     ):
         video_frames = np.empty(
             (self.num_envs, eval_budget, *self.infos['pixels'].shape[-3:]),
@@ -1308,10 +1325,39 @@ class World:
                     st0 = st0[:, -1]
                 traj["ee_pos"].append(st0[:, -3:].copy())
 
+        joint_logs = None
+        if collect_joint_logs:
+            joint_logs = {
+                "target_action": [],
+                "actual_qpos": [],
+            }
+
+            # reset直後の qpos を保存
+            if "state" in self.infos:
+                st0 = np.asarray(self.infos["state"])
+                if st0.ndim > 2:
+                    st0 = st0[:, -1]
+                joint_logs["actual_qpos"].append(st0[:, :7].copy())
+
         for i in range(eval_budget):
             video_frames[:, i] = self.infos['pixels'][:, -1]
             self.infos.update(deepcopy(goal_step))
-            self.step()
+
+            # ---- action を明示的に取得 ----
+            if self.policy is None:
+                raise RuntimeError("No policy set. Call set_policy() first.")
+            actions = self.policy.get_action(self.infos)
+
+            if collect_joint_logs:
+                joint_logs["target_action"].append(np.asarray(actions).copy())
+
+            (
+                self.states,
+                self.rewards,
+                self.terminateds,
+                self.truncateds,
+                self.infos,
+            ) = self.envs.step(actions)
 
             results['episode_successes'] = np.logical_or(
                 results['episode_successes'], self.terminateds
@@ -1336,15 +1382,31 @@ class World:
                         st = st[:, -1]
                     traj["ee_pos"].append(st[:, -3:].copy())
 
+            if collect_joint_logs:
+                if "state" in self.infos:
+                    st = np.asarray(self.infos["state"])
+                    if st.ndim > 2:
+                        st = st[:, -1]
+                    joint_logs["actual_qpos"].append(st[:, :7].copy())
+
         if eval_budget > 0:
             video_frames[:, -1] = self.infos['pixels'][:, -1]
 
+        out = [video_frames]
+
         if collect_traj:
             traj = {k: np.stack(v, axis=1) for k, v in traj.items()}
-            # shape: (num_envs, T+1, 3)
-            return video_frames, traj
+            out.append(traj)
 
-        return video_frames
+        if collect_joint_logs:
+            joint_logs = {k: np.stack(v, axis=1) for k, v in joint_logs.items()}
+            # target_action: (num_envs, T, 7)
+            # actual_qpos:   (num_envs, T+1, 7)
+            out.append(joint_logs)
+
+        if len(out) == 1:
+            return out[0]
+        return tuple(out)
 
 
     def _save_evaluation_videos(
