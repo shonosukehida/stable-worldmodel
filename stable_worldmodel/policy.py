@@ -401,6 +401,9 @@ class WorldModelPolicy(BasePolicy):
             outputs = self.solver(info_dict, init_action=self._next_init)
 
             actions = outputs['actions']  # (num_envs, horizon, action_dim)
+            print("actions.shape:", actions.shape)
+            # print("actions:", actions)
+            
             keep_horizon = self.cfg.receding_horizon
             plan = actions[:, :keep_horizon]
             rest = actions[:, keep_horizon:]

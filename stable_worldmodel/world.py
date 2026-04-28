@@ -26,6 +26,7 @@ from stable_worldmodel.policy import Policy
 from .wrapper import MegaWrapper, SyncWorld, VariationWrapper
 
 from stable_worldmodel.plot.plot import plot_task_result_xy, plot_joint_angle_comparison
+import matplotlib.pyplot as plt
 
 
 def _make_env(env_name, max_episode_steps, wrappers, **kwargs):
@@ -1083,6 +1084,11 @@ class World:
         result_seeds = None if seed_list is None else np.array(seed_list)
 
         self.reset(seed=seeds, options=options)
+        # print("infos keys:", self.infos.keys())
+        # print("start input:", start_arr)
+        # print("goal input:", goal_arr)
+        # print("actual bluebox:", self.infos["bluebox_pos"][:, -1])
+        # print("goal_step goal_state:", goal_step.get("goal_state", None))
 
         callables = callables or []
         if callables:
@@ -1283,6 +1289,16 @@ class World:
             if goal_img.ndim > 3:
                 goal_img = goal_img[-1]
             goal_images.append(goal_img)
+            
+            # print("[GOAL RENDER] goal_state:", goal_state)
+            # print("[GOAL RENDER] returned info keys:", goal_infos.keys())
+        # save_dir = "./debug_goal_images"
+        # os.makedirs(save_dir, exist_ok=True)
+
+        # for i, img in enumerate(goal_images):
+        #     save_path = os.path.join(save_dir, f"goal_image_env_{i}.png")
+        #     plt.imsave(save_path, img)
+        #     print(f"[GOAL IMG] saved: {save_path}")
 
         return np.stack(goal_images)
 
@@ -1346,6 +1362,8 @@ class World:
             # ---- action を明示的に取得 ----
             if self.policy is None:
                 raise RuntimeError("No policy set. Call set_policy() first.")
+
+
             actions = self.policy.get_action(self.infos)
 
             if collect_joint_logs:
