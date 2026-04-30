@@ -48,6 +48,7 @@ class CEMSolver:
 
     def configure(self, *, action_space: gym.Space, n_envs: int, config: Any) -> None:
         """Configure the solver with environment specifications."""
+
         self._action_space = action_space
         self._n_envs = n_envs
         self._config = config

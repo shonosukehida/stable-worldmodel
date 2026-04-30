@@ -11,6 +11,7 @@ from torchvision import tv_tensors
 
 import stable_worldmodel as swm
 from stable_worldmodel.solver import Solver
+import gymnasium as gym
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,7 @@ class PlanConfig:
     history_len: int = 1
     action_block: int = 1
     warm_start: bool = True
+    action_space: str = ""
 
     @property
     def plan_len(self) -> int:
@@ -357,6 +359,10 @@ class WorldModelPolicy(BasePolicy):
         self.transform = transform or {}
         self._action_buffer: deque[torch.Tensor] | None = None
         self._next_init: torch.Tensor | None = None
+        
+        print("self.process:", self.process)
+
+
 
     @property
     def flatten_receding_horizon(self) -> int:
@@ -370,9 +376,22 @@ class WorldModelPolicy(BasePolicy):
             env: The environment to associate with the policy.
         """
         self.env = env
+        if self.cfg.action_space == "joint":
+            self.action_space = self.env.action_space
+        elif self.cfg.action_space == "cartesian":
+            self.action_space = gym.spaces.Box(
+                low=np.array([[0.315, -0.2, 0.05]], dtype=np.float32),
+                high=np.array([[0.515,  0.2, 0.05]], dtype=np.float32),
+                dtype=np.float32,
+            )
+            
+            
+        
+        
+        
         n_envs = getattr(env, 'num_envs', 1)
         self.solver.configure(
-            action_space=env.action_space, n_envs=n_envs, config=self.cfg
+            action_space=self.action_space, n_envs=n_envs, config=self.cfg
         )
         self._action_buffer = deque(maxlen=self.flatten_receding_horizon)
 
@@ -417,12 +436,25 @@ class WorldModelPolicy(BasePolicy):
             self._action_buffer.extend(plan.transpose(0, 1))
 
         action = self._action_buffer.popleft()
-        action = action.reshape(*self.env.action_space.shape)
+        action = action.reshape(*self.action_space.shape)
         action = action.numpy()
 
         # post-process action
-        if 'action' in self.process:
+
+        if 'action' in self.process: ##
             action = self.process['action'].inverse_transform(action)
+
+        print("before action process")
+        print("target_xyz after inverse:", action)
+        print("min/max:", action.min(), action.max())
+        print("if ac_cart")
+        print("action.shape:", action.shape)
+        if "action_cartesian" in self.process:
+            action = self.process["action_cartesian"].inverse_transform(action)
+            print("action_cartesian in self.process")
+        print("after action process")
+        print("target_xyz after inverse:", action)
+        print("min/max:", action.min(), action.max())
 
         return action  # (num_envs, action_dim)
 
