@@ -1,3 +1,6 @@
+#configureの引数にaction_processor を追加(CEM用に追加したので、それ以外に使う想定は現状ないが、共通フィールドにするため)
+
+
 """Lagrangian solver for stable world model."""
 
 import time
@@ -89,7 +92,7 @@ class LagrangianSolver(torch.nn.Module):
         self._lambdas: torch.Tensor | None = None  # (n_envs, C)
 
     def configure(
-        self, *, action_space: gym.Space, n_envs: int, config: Any
+        self, *, action_space: gym.Space, n_envs: int, config: Any, action_processor = None
     ) -> None:
         """Configure the solver with environment specifications."""
         self._action_space = action_space

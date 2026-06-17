@@ -1,3 +1,6 @@
+#configureの引数にaction_processor を追加(CEM用に追加したので、それ以外に使う想定は現状ないが、共通フィールドにするため)
+
+
 """Model Predictive Path Integral solver for model-based planning."""
 
 import time
@@ -49,7 +52,7 @@ class MPPISolver:
         self.device = device
         self.torch_gen = torch.Generator(device=device).manual_seed(seed)
 
-    def configure(self, *, action_space: gym.Space, n_envs: int, config: Any) -> None:
+    def configure(self, *, action_space: gym.Space, n_envs: int, config: Any, action_processor = None) -> None:
         """Configure the solver with environment specifications."""
         self._action_space = action_space
         self._n_envs = n_envs

@@ -25,8 +25,10 @@ from stable_worldmodel.policy import Policy
 
 from .wrapper import MegaWrapper, SyncWorld, VariationWrapper
 
-from stable_worldmodel.plot.plot import plot_task_result_xy, plot_joint_angle_comparison
+from stable_worldmodel.plot.plot import plot_task_result_xy, plot_joint_angle_comparison, plot_cartesian_comparison
 import matplotlib.pyplot as plt
+
+from stable_worldmodel.plot.plot import plot_cem_rollout_cost
 
 
 def _make_env(env_name, max_episode_steps, wrappers, **kwargs):
@@ -51,6 +53,7 @@ def _make_env(env_name, max_episode_steps, wrappers, **kwargs):
         >>> env = _make_env("CartPole-v1", max_episode_steps=500, wrappers=wrappers)
     """
     env = gym.make(env_name, max_episode_steps=max_episode_steps, **kwargs)
+    print("env:", env)
     for wrapper in wrappers:
         env = wrapper(env)
     return env
@@ -110,6 +113,7 @@ class World:
         env_fn = partial(
             _make_env, env_name, max_episode_steps, wrappers, **kwargs
         )
+        self.env_fn = env_fn
         env_fns = [env_fn for _ in range(num_envs)]
         # print("self.envs:", env_fns[0])
         self.envs: VectorEnv = VariationWrapper(SyncWorld(env_fns))
@@ -125,6 +129,7 @@ class World:
         self.rewards: np.ndarray | None = None
         self.terminateds: np.ndarray | None = None
         self.truncateds: np.ndarray | None = None
+
 
         if verbose > 0:
             logging.info(f'🌍🌍🌍 World {env_name} initialized 🌍🌍🌍')
@@ -188,7 +193,9 @@ class World:
         if self.policy is None:
             raise RuntimeError('No policy set. Call set_policy() first.')
 
+        # print("(stable_worldmodel/world.py, step)self.infos.keys(): ", self.infos.keys())
         actions = self.policy.get_action(self.infos)
+        
         (
             self.states,
             self.rewards,
@@ -209,9 +216,12 @@ class World:
             options: Additional options passed to the environment reset.
         """
         
+        
         self.states, self.infos = self.envs.reset(seed=seed, options=options)
+        # print("(stable_worldmodel/world.py) self.env:", type(self.envs))
+        # print("(stable_worldmodel/world.py) self.infos.keys():", self.infos.keys())
 
-    def set_policy(self, policy: Policy) -> None:
+    def set_policy(self, policy: Policy, results_path = None) -> None:
         """Attach a policy to the world.
 
         Args:
@@ -222,6 +232,9 @@ class World:
 
         if hasattr(self.policy, 'seed') and self.policy.seed is not None:
             self.policy.set_seed(self.policy.seed)
+            
+        self.policy.results_path = results_path
+        self.results_path = results_path
 
     def record_video(
         self,
@@ -816,8 +829,10 @@ class World:
         print("")
         data = dataset.load_chunk(ep_idx_arr, start_steps_arr, end_steps)
         columns = dataset.column_names
-        # print("columns:", columns) #['action','bluebox_pos','ee_pos','ep_idx','pixels','qpos','qvel','step_idx']
-
+        # print("columns:", columns) 
+        
+        
+        
         # keep relevant part of the chunk
         init_step_per_env: dict[str, list[Any]] = defaultdict(list)
         goal_step_per_env: dict[str, list[Any]] = defaultdict(list)
@@ -957,9 +972,12 @@ class World:
             for k, v in goal_step.items()
         }
 
+        # print("(stable_worldmodel/world.py)(before) self.infos.keys(): ", self.infos.keys())
+        
         # update the reset with our new init and goal infos
         self.infos.update(deepcopy(init_step))
         self.infos.update(deepcopy(goal_step))
+        # print("(stable_worldmodel/world.py)(after) self.infos.keys(): ", self.infos.keys())
 
         if 'goal' in goal_step and 'goal' in self.infos:
             assert np.allclose(self.infos['goal'], goal_step['goal']), (
@@ -1000,10 +1018,12 @@ class World:
         start_positions: Sequence[Any],
         goal_positions: Sequence[Any],
         init_ee_poses: Sequence[Any],
+        goal_ee_poses: Sequence[Any],
         eval_budget: int,
         start_option_name: str = 'state',
         goal_option_name: str = 'target_state',
         init_ee_option_name: str = 'init_ee_pos',
+        goal_ee_option_name: str = 'goal_ee_pos',
         start_info_name: str | None = 'state',
         goal_info_name: str | None = 'goal_state',
         seeds: int | Sequence[int | None] | None = None,
@@ -1011,6 +1031,10 @@ class World:
         callables: list[dict[str, Any]] | None = None,
         save_video: bool = True,
         video_path: str | Path = './',
+        plot_joint_compare_normed: bool = False,
+        x_range = None,
+        y_range = None, 
+        z_range = None, 
     ) -> dict:
         """Evaluate the policy from manually specified start and goal positions.
 
@@ -1040,6 +1064,8 @@ class World:
         start_arr = np.asarray(start_positions)
         goal_arr = np.asarray(goal_positions)
         init_ee_arr = np.asarray(init_ee_poses)
+        goal_ee_arr = np.asarray(goal_ee_poses)
+        # print("goal_ee_arr: ", goal_ee_arr)
 
         if start_arr.ndim == 0 or goal_arr.ndim == 0:
             raise ValueError('start_positions and goal_positions must be arrays')
@@ -1079,6 +1105,7 @@ class World:
             options[i][start_option_name] = np.array(start_arr[i], copy=True)
             options[i][goal_option_name] = np.array(goal_arr[i], copy=True)
             options[i][init_ee_option_name] = np.array(init_ee_arr[i], copy=True)
+            options[i][goal_ee_option_name] = np.array(goal_ee_arr[i], copy=True)
 
         seed_list = self._expand_reset_seeds(seeds)
         result_seeds = None if seed_list is None else np.array(seed_list)
@@ -1136,7 +1163,7 @@ class World:
                     method(**prepared_args)
 
         goal_visuals = None
-        if 'goal' not in self.infos:
+        if 'goal' not in self.infos: #ここでゴール画像作ってる
             goal_visuals = self._render_goal_observations(
                 goal_positions=goal_arr,
                 base_options=options,
@@ -1146,6 +1173,27 @@ class World:
             )
             # Restore the intended start states after rendering goal observations.
             self.reset(seed=seeds, options=options)
+            
+            # print("goal_visuals.shape: ", goal_visuals.shape)
+
+            from PIL import Image
+            from pathlib import Path
+
+            save_dir = Path("./debug_goal_visuals")
+            save_dir.mkdir(parents=True, exist_ok=True)
+
+            img = goal_visuals[0]  # (64, 64, 3)
+
+            # float画像なら 0~255 uint8 に変換
+            if img.dtype != np.uint8:
+                if img.max() <= 1.0:
+                    img = (img * 255).clip(0, 255)
+                img = img.astype(np.uint8)
+
+            Image.fromarray(img).save(save_dir / "goal_visual_0.png")
+            print("saved:", save_dir / "goal_visual_0.png")
+            
+            
 
         shape_prefix = self.infos['pixels'].shape[:2]
         if start_info_name is not None:
@@ -1180,7 +1228,7 @@ class World:
             'init_ee_poses': np.array(init_ee_arr, copy=True),
         }
 
-        video_frames, traj, joint_logs = self._run_evaluation_rollout(
+        video_frames, traj, joint_logs, cartesian_logs  = self._run_evaluation_rollout(
             goal_step=goal_step,
             eval_budget=eval_budget,
             results=results,
@@ -1188,22 +1236,26 @@ class World:
             collect_joint_logs=True,
         )
         
-        print("[stable_worldmodel/world.py] traj:", traj)
-        
 
         results["traj_bluebox_pos"] = traj["bluebox_pos"]
+        results["traj_bluebox_quat"] = traj["bluebox_quat"]
         results["traj_ee_pos"] = traj["ee_pos"]
         results["traj_target_action"] = joint_logs["target_action"]
         results["traj_actual_qpos"] = joint_logs["actual_qpos"]
+        # results["traj_target_xyz"] = cartesian_logs["target_xyz"]
+        # results["traj_actual_ee_pos"] = cartesian_logs["actual_ee_pos"]
         results['success_rate'] = (
             float(np.sum(results['episode_successes'])) / self.num_envs * 100.0
         )
+        if cartesian_logs is not None:
+            results["traj_target_xyz"] = cartesian_logs["target_xyz"]
+            results["traj_actual_ee_pos"] = cartesian_logs["actual_ee_pos"]
 
         if save_video:
             target_frames = None
             if 'goal' in goal_step:
                 target_frames = np.array(goal_step['goal'][:, -1:], copy=True)
-            self._save_evaluation_videos(
+            self._save_evaluation_videos_2split(
                 video_frames=video_frames,
                 target_frames=target_frames,
                 video_path=video_path,
@@ -1213,18 +1265,26 @@ class World:
             plot_dir = Path(video_path) / "task_map"
             plot_dir.mkdir(parents=True, exist_ok=True)
 
+            
             for env_idx in range(self.num_envs):
                 plot_task_result_xy(
                     bluebox_traj=results["traj_bluebox_pos"][env_idx],
+                    bluebox_quat_traj=results["traj_bluebox_quat"][env_idx],
                     ee_traj=results["traj_ee_pos"][env_idx],
                     goal_pos=results["goal_positions"][env_idx],
                     save_path=plot_dir / f"task_plot_{env_idx}.png",
                     title=f"Task Visualization env={env_idx}",
+                    workspace_x=x_range, 
+                    workspace_y=y_range, 
                 )
-                
+        print("results.keys():", results.keys())
         if "traj_target_action" in results and "traj_actual_qpos" in results:
             joint_plot_dir = Path(video_path) / "joint_angle"
             joint_plot_dir.mkdir(parents=True, exist_ok=True)
+            
+            cart_plot_dir = Path(video_path) / "cartesian"
+            cart_plot_dir.mkdir(parents=True, exist_ok=True)
+
 
             for env_idx in range(self.num_envs):
                 plot_joint_angle_comparison(
@@ -1233,7 +1293,17 @@ class World:
                     save_path=joint_plot_dir / f"joint_angle_env_{env_idx}.png",
                     title="Joint angle comparison",
                     episode_idx=env_idx,
+                    normalize=plot_joint_compare_normed,
                 )
+                if cartesian_logs is not None:
+                    plot_cartesian_comparison(
+                        target_xyz=results["traj_target_xyz"][env_idx],
+                        actual_ee_pos=results["traj_actual_ee_pos"][env_idx],
+                        save_path=cart_plot_dir / f"cartesian_env_{env_idx}.png",
+                        title="Cartesian target vs actual EE",
+                        episode_idx=env_idx,
+                        
+                    )
 
         return results
 
@@ -1271,6 +1341,15 @@ class World:
             goal_options[start_option_name] = goal_state
             goal_options[goal_option_name] = np.array(goal_positions[i], copy=True)
 
+            # print("(stable_worldmodel/world.py) self.envs:", self.envs)
+            # print("(stable_worldmodel/world.py) self.envs.envs[i]:", self.envs.envs[i])
+            
+            print("(stable_worldmodel/world.py) goal_options.keys():", goal_options.keys()) #dict_keys(['box_pos', goal_marker_pos', 'init_ee_pos', 'goal_ee_pos'])
+        
+            
+            if goal_options.get("goal_ee_pos", None) is not None:
+                goal_options["init_ee_pos"] = np.array(goal_options["goal_ee_pos"], copy=True)
+            
             _, goal_infos = self.envs.envs[i].reset(
                 seed=None if seed_list is None else seed_list[i],
                 options=goal_options,
@@ -1292,6 +1371,8 @@ class World:
             
             # print("[GOAL RENDER] goal_state:", goal_state)
             # print("[GOAL RENDER] returned info keys:", goal_infos.keys())
+
+
         # save_dir = "./debug_goal_images"
         # os.makedirs(save_dir, exist_ok=True)
 
@@ -1320,6 +1401,7 @@ class World:
         if collect_traj:
             traj = {
                 "bluebox_pos": [],
+                "bluebox_quat": [],
                 "ee_pos": [],
             }
 
@@ -1329,6 +1411,12 @@ class World:
                 if blue0.ndim > 2:
                     blue0 = blue0[:, -1]
                 traj["bluebox_pos"].append(blue0.copy())
+                
+            if "bluebox_quat" in self.infos:
+                quat0 = np.asarray(self.infos["bluebox_quat"])
+                if quat0.ndim > 2:
+                    quat0 = quat0[:, -1]
+                traj["bluebox_quat"].append(quat0.copy())
 
             if "ee_pos" in self.infos:
                 ee0 = np.asarray(self.infos["ee_pos"])
@@ -1355,6 +1443,14 @@ class World:
                     st0 = st0[:, -1]
                 joint_logs["actual_qpos"].append(st0[:, :7].copy())
 
+        cartesian_logs = None
+        if collect_joint_logs:
+            cartesian_logs = {
+                "target_xyz": [],
+                "actual_ee_pos": [],
+            }
+            
+        cem_cost_over_time = []
         for i in range(eval_budget):
             video_frames[:, i] = self.infos['pixels'][:, -1]
             self.infos.update(deepcopy(goal_step))
@@ -1364,10 +1460,30 @@ class World:
                 raise RuntimeError("No policy set. Call set_policy() first.")
 
 
-            actions = self.policy.get_action(self.infos)
+            actions, outputs = self.policy.get_action(self.infos)
+            
+            ####cemの最終コストをログ
+            if outputs is not None:
+                elite_mean = torch.stack(
+                    outputs["elite_cost_mean_n_steps"]
+                )[:, 0]
 
-            if collect_joint_logs:
-                joint_logs["target_action"].append(np.asarray(actions).copy())
+                elite_min = torch.stack(
+                    outputs["elite_cost_min_n_steps"]
+                )[:, 0]
+
+                cem_cost_over_time.append({
+                    "timestep": i,
+                    "final_mean": elite_mean[-1].item(),
+                    "final_min": elite_min[-1].item(),
+                    "initial_mean": elite_mean[0].item(),
+                    "initial_min": elite_min[0].item(),
+                })
+            ##########
+            
+
+            # if collect_joint_logs:
+            #     joint_logs["target_action"].append(np.asarray(actions).copy())
 
             (
                 self.states,
@@ -1376,6 +1492,62 @@ class World:
                 self.truncateds,
                 self.infos,
             ) = self.envs.step(actions)
+            
+            if collect_joint_logs:
+                # target_qpos を使う
+                if "target_qpos" in self.infos:
+                    tq = np.asarray(self.infos["target_qpos"])
+                    if tq.ndim > 2:
+                        tq = tq[:, -1]
+                    joint_logs["target_action"].append(tq[:, :7].copy())
+
+                # actualもinfoから
+                if "actual_qpos" in self.infos:
+                    aq = np.asarray(self.infos["actual_qpos"])
+                    if aq.ndim > 2:
+                        aq = aq[:, -1]
+                    joint_logs["actual_qpos"].append(aq[:, :7].copy())
+                    
+
+                # if "target_xyz" in self.infos:
+                #     tx = np.asarray(self.infos["target_xyz"])
+                #     # print("tx.shape:", tx.shape)
+                #     if tx.ndim == 2 and tx.shape[1] >= 3:
+                    
+                #         cartesian_logs["target_xyz"].append(tx[:, :3].copy())
+
+                # if "actual_ee_pos" in self.infos:
+                #     ee = np.asarray(self.infos["actual_ee_pos"])
+                #     if ee.ndim > 2:
+                #         ee = ee[:, -1]
+                #     cartesian_logs["actual_ee_pos"].append(ee[:, :3].copy())
+                # elif "ee_pos" in self.infos:
+                #     ee = np.asarray(self.infos["ee_pos"])
+                #     if ee.ndim > 2:
+                #         ee = ee[:, -1]
+                #     cartesian_logs["actual_ee_pos"].append(ee[:, :3].copy())
+
+                if "target_xyz" in self.infos:
+                    tx = np.asarray(self.infos["target_xyz"])
+
+                    if tx.ndim == 2 and tx.shape[1] >= 3:
+                        cartesian_logs["target_xyz"].append(tx[:, :3].copy())
+
+                        if "actual_ee_pos" in self.infos:
+                            ee = np.asarray(self.infos["actual_ee_pos"])
+                            if ee.ndim > 2:
+                                ee = ee[:, -1]
+                            cartesian_logs["actual_ee_pos"].append(ee[:, :3].copy())
+
+                        elif "ee_pos" in self.infos:
+                            ee = np.asarray(self.infos["ee_pos"])
+                            if ee.ndim > 2:
+                                ee = ee[:, -1]
+                            cartesian_logs["actual_ee_pos"].append(ee[:, :3].copy())
+
+
+
+
 
             results['episode_successes'] = np.logical_or(
                 results['episode_successes'], self.terminateds
@@ -1400,12 +1572,12 @@ class World:
                         st = st[:, -1]
                     traj["ee_pos"].append(st[:, -3:].copy())
 
-            if collect_joint_logs:
-                if "state" in self.infos:
-                    st = np.asarray(self.infos["state"])
-                    if st.ndim > 2:
-                        st = st[:, -1]
-                    joint_logs["actual_qpos"].append(st[:, :7].copy())
+            # if collect_joint_logs:
+            #     if "state" in self.infos:
+            #         st = np.asarray(self.infos["state"])
+            #         if st.ndim > 2:
+            #             st = st[:, -1]
+            #         joint_logs["actual_qpos"].append(st[:, :7].copy())
 
         if eval_budget > 0:
             video_frames[:, -1] = self.infos['pixels'][:, -1]
@@ -1417,13 +1589,36 @@ class World:
             out.append(traj)
 
         if collect_joint_logs:
-            joint_logs = {k: np.stack(v, axis=1) for k, v in joint_logs.items()}
-            # target_action: (num_envs, T, 7)
-            # actual_qpos:   (num_envs, T+1, 7)
+            joint_logs = {
+                k: np.stack(v, axis=1)
+                for k, v in joint_logs.items()
+            }
             out.append(joint_logs)
+
+            # cartesian_logs は中身があるときだけ stack
+            if (
+                cartesian_logs is not None
+                and len(cartesian_logs["target_xyz"]) > 0
+                and len(cartesian_logs["actual_ee_pos"]) > 0
+            ):
+                cartesian_logs = {
+                    k: np.stack(v, axis=1)
+                    for k, v in cartesian_logs.items()
+                }
+            else:
+                cartesian_logs = None
+
+            out.append(cartesian_logs)
+        
+        #CEMのコスト遷移をプロット
+        if len(cem_cost_over_time) > 0:
+            plot_cem_rollout_cost(cem_cost_over_time, self.results_path)
 
         if len(out) == 1:
             return out[0]
+        
+        # print('type(joint_logs["actual_qpos"]):')
+        # print('type(joint_logs["actual_qpos"]):', type(joint_logs["actual_qpos"]))
         return tuple(out)
 
 
@@ -1460,4 +1655,45 @@ class World:
                 frame = np.hstack([stacked_frame, goals])
                 out.append_data(frame)
             out.close()
+        print(f'Video saved to {video_path_obj}')
+
+    def _save_evaluation_videos_2split(
+        self,
+        video_frames: np.ndarray,
+        target_frames: np.ndarray | None,
+        video_path: str | Path,
+    ) -> None:
+        """Save rollout videos with current frame and final goal frame side by side."""
+        import imageio
+
+        if video_frames.shape[1] == 0:
+            logging.warning('No rollout frames to save, skipping video export.')
+            return
+
+        if target_frames is None:
+            target_frames = video_frames[:, -1:, ...]
+
+        video_path_obj = Path(video_path)
+        video_path_obj.mkdir(parents=True, exist_ok=True)
+
+        for i in range(self.num_envs):
+            out = imageio.get_writer(
+                video_path_obj / f'rollout_{i}.mp4',
+                fps=15,
+                codec='libx264',
+            )
+
+            # 目標画像は常に最終goalだけ
+            goal = target_frames[i, -1]
+
+            for t in range(video_frames.shape[1]):
+                current = video_frames[i, t]
+
+                # 左: タスク実行中, 右: 最終goal
+                frame = np.hstack([current, goal])
+
+                out.append_data(frame)
+
+            out.close()
+
         print(f'Video saved to {video_path_obj}')

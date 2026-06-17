@@ -1,3 +1,6 @@
+#configureの引数にaction_processor を追加(CEM用に追加したので、それ以外に使う想定は現状ないが、共通フィールドにするため)
+
+
 """Gradient-based solver for model-based planning."""
 
 import time
@@ -62,7 +65,7 @@ class GradientSolver(torch.nn.Module):
         self._config = None
 
     def configure(
-        self, *, action_space: gym.Space, n_envs: int, config: Any
+        self, *, action_space: gym.Space, n_envs: int, config: Any, action_processor = None
     ) -> None:
         """Configure the solver with environment specifications."""
         self._action_space = action_space

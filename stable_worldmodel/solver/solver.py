@@ -1,3 +1,5 @@
+#configureの引数にaction_processor を追加(CEM用に追加したので、それ以外に使う想定は現状ないが、共通フィールドにするため)
+
 from typing import Any, Protocol, runtime_checkable
 
 import gymnasium as gym
@@ -36,7 +38,7 @@ class Costable(Protocol):
 class Solver(Protocol):
     """Protocol for model-based planning solvers."""
 
-    def configure(self, *, action_space: gym.Space, n_envs: int, config: Any) -> None:
+    def configure(self, *, action_space: gym.Space, n_envs: int, config: Any, action_processor = None) -> None:
         """Configure the solver with environment and planning specifications.
 
         Args:

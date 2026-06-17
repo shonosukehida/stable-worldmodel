@@ -1,3 +1,6 @@
+#configureの引数にaction_processor を追加(CEM用に追加したので、それ以外に使う想定は現状ないが、共通フィールドにするため)
+
+
 """Projected Gradient Descent solver for discrete action spaces."""
 
 import time
@@ -52,7 +55,7 @@ class PGDSolver(torch.nn.Module):
         self._action_simplex_dim = None
         self._config = None
 
-    def configure(self, *, action_space: gym.Space, n_envs: int, config: Any) -> None:
+    def configure(self, *, action_space: gym.Space, n_envs: int, config: Any, action_processor = None) -> None:
         """Configure the solver with environment specifications."""
         assert isinstance(action_space, Discrete), f"Action space must be discrete, got {type(action_space)}"
 

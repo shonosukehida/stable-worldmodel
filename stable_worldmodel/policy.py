@@ -14,6 +14,11 @@ from stable_worldmodel.solver import Solver
 import gymnasium as gym
 
 
+
+
+from stable_worldmodel.plot.plot import plot_cem_cost_convergence, plot_cem_sequence_transition_colormap
+
+
 @dataclass(frozen=True)
 class PlanConfig:
     """Configuration for the MPC planning loop.
@@ -32,6 +37,7 @@ class PlanConfig:
     action_block: int = 1
     warm_start: bool = True
     action_space: str = ""
+    clip_action: bool = True
 
     @property
     def plan_len(self) -> int:
@@ -360,7 +366,10 @@ class WorldModelPolicy(BasePolicy):
         self._action_buffer: deque[torch.Tensor] | None = None
         self._next_init: torch.Tensor | None = None
         
-        print("self.process:", self.process)
+        # print("self.process:", self.process)
+        
+        
+        self.results_path = None
 
 
 
@@ -377,21 +386,36 @@ class WorldModelPolicy(BasePolicy):
         """
         self.env = env
         if self.cfg.action_space == "joint":
-            self.action_space = self.env.action_space
+            self.action_space = self.env.action_space #実空間
+            
+            if ("action" in self.process.keys()):
+                self.action_processor = self.process["action"] 
+                # action_processor = self.process["action_joint"] 
+            elif ("action_joint" in self.process.keys()): 
+                self.action_processor = self.process["action_joint"] 
+            
         elif self.cfg.action_space == "cartesian":
             self.action_space = gym.spaces.Box(
-                low=np.array([[0.315, -0.2, 0.05]], dtype=np.float32),
-                high=np.array([[0.515,  0.2, 0.05]], dtype=np.float32),
+                low=np.array([[0.315, -0.2, 0.095]], dtype=np.float32),
+                high=np.array([[0.715,  0.2, 0.105]], dtype=np.float32),
                 dtype=np.float32,
+            ) #実空間
+            self.action_processor = self.process["action_cartesian"]
+        else:
+            raise ValueError(
+                f"Unknown action_space: {self.cfg.action_space}. "
+                "Expected 'joint' or 'cartesian'."
             )
-            
+        
+        # print("self.process.keys():", self.process.keys())
             
         
         
         
         n_envs = getattr(env, 'num_envs', 1)
+        # print("(stable_worldmodel/policy.py)self.action_space:", self.action_space)
         self.solver.configure(
-            action_space=self.action_space, n_envs=n_envs, config=self.cfg
+            n_envs=n_envs, config=self.cfg, action_processor=self.action_processor, action_space=self.action_space, 
         )
         self._action_buffer = deque(maxlen=self.flatten_receding_horizon)
 
@@ -409,20 +433,42 @@ class WorldModelPolicy(BasePolicy):
         Returns:
             The selected action(s) as a numpy array.
         """
+        
         assert hasattr(self, 'env'), 'Environment not set for the policy'
         assert 'pixels' in info_dict, "'pixels' must be provided in info_dict"
         assert 'goal' in info_dict, "'goal' must be provided in info_dict"
+        print("self.cfg.warm_start:", self.cfg.warm_start)
 
         info_dict = self._prepare_info(info_dict)
+        # print("[stable-worldmodel/stable_worldmodel/policy.py] info_dict.keys() : ", info_dict.keys())
+        # print("info_dict(step_idx)", info_dict["step_idx"][0][0])
 
+        outputs = None
         # need to replan if action buffer is empty
         if len(self._action_buffer) == 0:
             outputs = self.solver(info_dict, init_action=self._next_init)
+            
+            
+            #cem の内部状況をログ
+            timestep = int(info_dict["step_idx"][0][0])
+            save_dir = self.results_path / "cem"
+            save_dir.mkdir(parents=True, exist_ok=True)
+            
+            plot_cem_cost_convergence(outputs, env_idx=0, save_dir=save_dir, timestep=timestep)
+            plot_cem_sequence_transition_colormap(outputs, env_idx=0, save_dir=save_dir, timestep=timestep, action_processor=self.action_processor)
 
             actions = outputs['actions']  # (num_envs, horizon, action_dim)
             print("actions.shape:", actions.shape)
-            # print("actions:", actions)
+            print("type(actions):", type(actions))
             
+            
+            actions_np = actions.cpu().numpy() if torch.is_tensor(actions) else actions
+
+            for d in range(actions_np.shape[-1]):
+                print(f"dim {d}: min={actions_np[..., d].min():.3f}, max={actions_np[..., d].max():.3f}") 
+            
+
+
             keep_horizon = self.cfg.receding_horizon
             plan = actions[:, :keep_horizon]
             rest = actions[:, keep_horizon:]
@@ -440,23 +486,28 @@ class WorldModelPolicy(BasePolicy):
         action = action.numpy()
 
         # post-process action
-
+        
+        # print("action in self.process: ", 'action' in self.process)
         if 'action' in self.process: ##
             action = self.process['action'].inverse_transform(action)
-
-        print("before action process")
-        print("target_xyz after inverse:", action)
-        print("min/max:", action.min(), action.max())
-        print("if ac_cart")
-        print("action.shape:", action.shape)
-        if "action_cartesian" in self.process:
+            # action_joint = action
+        elif "action_cartesian" in self.process:
             action = self.process["action_cartesian"].inverse_transform(action)
-            print("action_cartesian in self.process")
-        print("after action process")
-        print("target_xyz after inverse:", action)
-        print("min/max:", action.min(), action.max())
+        elif "action_joint" in self.process:
+            action = self.process["action_joint"].inverse_transform(action)
+        
+        
+        # action = np.clip(
+        #     action,
+        #     self.action_space.low,
+        #     self.action_space.high,
+        # )
+        
+            
+        
+        print("self.action_space:", self.action_space)
 
-        return action  # (num_envs, action_dim)
+        return action, outputs  # (num_envs, action_dim)
 
 
 def _load_model_with_attribute(run_name, attribute_name, cache_dir=None):
@@ -559,3 +610,4 @@ def AutoCostModel(
 
 # Alias for backward compatibility and type hinting
 Policy = BasePolicy
+

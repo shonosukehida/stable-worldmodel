@@ -146,6 +146,34 @@ def record_video_from_dataset(
     print(f'Video saved to {video_path}')
 
 
+
+def _make_env(env_name, max_episode_steps, wrappers, **kwargs):
+    """Create a gymnasium environment with specified wrappers.
+
+    Factory function for creating environments within a vectorized setup.
+    Creates the base environment and applies wrappers in order.
+
+    Args:
+        env_name: Name of the gymnasium environment to create.
+        max_episode_steps: Maximum steps per episode before truncation.
+        wrappers: List of wrapper functions/classes to apply. Each wrapper
+            should accept an environment and return a wrapped environment.
+        **kwargs: Additional keyword arguments passed to gym.make.
+
+    Returns:
+        The wrapped gymnasium environment.
+
+    Example:
+        >>> from functools import partial
+        >>> wrappers = [partial(MegaWrapper, image_shape=(64, 64))]
+        >>> env = _make_env("CartPole-v1", max_episode_steps=500, wrappers=wrappers)
+    """
+    env = gym.make(env_name, max_episode_steps=max_episode_steps, **kwargs)
+    for wrapper in wrappers:
+        env = wrapper(env)
+    return env
+
+
 __all__ = [
     'exists',
     'default',
