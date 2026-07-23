@@ -1418,3 +1418,287 @@ def plot_relative_pair_goal_cost_map_3d(
 
 
 
+def plot_action_predictor_goal_cost_map(
+    cost_data,
+    save_path=None,
+    title="Action position vs predictor goal latent cost",
+    show_min=True,
+    show_init=True,
+    show_goal=True,
+):
+    cost_map = np.asarray(cost_data["cost_map"])
+    xs = np.asarray(cost_data["xs"])
+    ys = np.asarray(cost_data["ys"])
+
+    init_ee_pos = np.asarray(cost_data.get("init_ee_pos", None))
+    init_bluebox_pos = np.asarray(cost_data.get("init_bluebox_pos", None))
+    goal_ee_pos = np.asarray(cost_data.get("goal_ee_pos", None))
+    goal_bluebox_pos = np.asarray(cost_data.get("goal_bluebox_pos", None))
+    min_action_pos = np.asarray(cost_data.get("min_action_pos", None))
+
+    min_cost = cost_data.get("min_cost", None)
+    cost_type = cost_data.get("cost_type", "cost")
+
+    fig, ax = plt.subplots(figsize=(7, 6))
+
+    im = ax.imshow(
+        cost_map,
+        origin="lower",
+        extent=[ys[0], ys[-1], xs[0], xs[-1]],
+        aspect="equal",
+    )
+
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label(f"Predictor latent {cost_type} cost")
+
+    if show_init and init_ee_pos is not None and init_ee_pos.size >= 2:
+        ax.scatter(
+            init_ee_pos[1],
+            init_ee_pos[0],
+            marker="*",
+            s=180,
+            label="init EE",
+        )
+
+    if show_init and init_bluebox_pos is not None and init_bluebox_pos.size >= 2:
+        ax.scatter(
+            init_bluebox_pos[1],
+            init_bluebox_pos[0],
+            marker="s",
+            s=100,
+            label="init box",
+        )
+
+    if show_goal and goal_ee_pos is not None and goal_ee_pos.size >= 2:
+        ax.scatter(
+            goal_ee_pos[1],
+            goal_ee_pos[0],
+            marker="*",
+            s=140,
+            label="goal EE",
+            color="cyan",
+        )
+
+    if show_goal and goal_bluebox_pos is not None and goal_bluebox_pos.size >= 2:
+        ax.scatter(
+            goal_bluebox_pos[1],
+            goal_bluebox_pos[0],
+            marker="o",
+            s=100,
+            label="goal box",
+            color="tab:green",
+        )
+
+    if show_min and min_action_pos is not None and min_action_pos.size >= 2:
+        label = "min action"
+        if min_cost is not None:
+            label += f" ({min_cost:.4g})"
+
+        ax.scatter(
+            min_action_pos[1],
+            min_action_pos[0],
+            marker="x",
+            s=140,
+            label=label,
+            color="tab:red",
+        )
+
+    ax.set_xlabel("Action Y")
+    ax.set_ylabel("Action X")
+    ax.set_title(title)
+    ax.legend(loc="best")
+    ax.grid(False)
+
+    fig.tight_layout()
+
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=200)
+        plt.close(fig)
+    else:
+        plt.show()
+
+    return fig
+
+
+
+def plot_cross_position_latent_pca_2d(
+    cross_data,
+    save_path=None,
+    title="Cross EE position encoder latent PCA",
+    color_map = None,
+):
+    latents = np.asarray(cross_data["latents"])
+    ee_pos = np.asarray(cross_data["ee_pos"])
+    labels = np.asarray(cross_data["labels"])
+    if color_map is None:
+        color_map = {
+            "x_axis": "C0",
+            "y_axis": "C1",
+        }
+
+    assert latents.ndim == 2, f"latents must be (N,D), got {latents.shape}"
+
+    pca = PCA(n_components=2)
+    z_pca = pca.fit_transform(latents)
+    var = pca.explained_variance_ratio_
+
+    fig, ax = plt.subplots(figsize=(8, 7))
+
+    for lab in sorted(np.unique(labels)):
+        mask = labels == lab
+        
+        color = color_map.get(str(lab), None)
+
+        ax.plot(
+            z_pca[mask, 0],
+            z_pca[mask, 1],
+            marker="o",
+            linewidth=2.0,
+            markersize=4,
+            label=lab,
+            color=color,
+            
+        )
+
+        ax.scatter(
+            z_pca[mask, 0][0],
+            z_pca[mask, 1][0],
+            marker="o",
+            s=70,
+            color=color,
+        )
+        ax.scatter(
+            z_pca[mask, 0][-1],
+            z_pca[mask, 1][-1],
+            marker="x",
+            s=90,
+            color=color,
+        )
+
+    ax.set_title(
+        f"{title}\n"
+        f"var exp: {var[0]:.3f}, {var[1]:.3f}"
+    )
+    ax.set_xlabel("PC1")
+    ax.set_ylabel("PC2")
+    ax.grid(True, linestyle=":", alpha=0.5)
+    ax.legend()
+
+    plt.tight_layout()
+
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(save_path, dpi=200, bbox_inches="tight")
+
+    plt.close(fig)
+
+    return {
+        "pca": pca,
+        "z_pca": z_pca,
+        "ee_pos": ee_pos,
+        "labels": labels,
+        "explained_variance_ratio": var,
+    }
+
+def plot_cross_position_xy_trajectory(
+    cross_data,
+    save_path=None,
+    title="Cross EE position trajectory",
+    color_map=None,
+):
+    ee_pos = np.asarray(cross_data["ee_pos"])      # (N, 3)
+    labels = np.asarray(cross_data["labels"])      # (N,)
+
+    assert ee_pos.ndim == 2 and ee_pos.shape[1] >= 2, \
+        f"ee_pos must be (N,>=2), got {ee_pos.shape}"
+
+    if color_map is None:
+        color_map = {
+            "x_axis": "C0",
+            "y_axis": "C1",
+        }
+
+    fig, ax = plt.subplots(figsize=(7, 7))
+
+    for lab in sorted(np.unique(labels)):
+        mask = labels == lab
+        pos = ee_pos[mask]
+
+        color = color_map.get(str(lab), None)
+
+        ax.plot(
+            pos[:, 0],
+            pos[:, 1],
+            marker="o",
+            linewidth=2.0,
+            markersize=4,
+            label=str(lab),
+            color=color,
+        )
+
+        # start
+        ax.scatter(
+            pos[0, 0],
+            pos[0, 1],
+            marker="o",
+            s=80,
+            color=color,
+        )
+
+        # end
+        ax.scatter(
+            pos[-1, 0],
+            pos[-1, 1],
+            marker="x",
+            s=120,
+            color=color,
+        )
+
+    # if "bluebox_pos" in cross_data:
+    #     box = np.asarray(cross_data["bluebox_pos"])
+    #     if box.size >= 2:
+    #         ax.scatter(
+    #             box[0],
+    #             box[1],
+    #             marker="s",
+    #             s=120,
+    #             label="bluebox",
+    #             color="C2",
+    #         )
+
+    if "center" in cross_data:
+        center = np.asarray(cross_data["center"])
+        if center.size >= 2:
+            ax.scatter(
+                center[0],
+                center[1],
+                marker="*",
+                s=180,
+                label="center",
+                color="C3",
+            )
+
+    ax.set_xlabel("EE X")
+    ax.set_ylabel("EE Y")
+    ax.set_title(title)
+    ax.set_aspect("equal")
+    ax.grid(True, linestyle=":", alpha=0.5)
+    ax.legend()
+
+    plt.tight_layout()
+
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(save_path, dpi=200, bbox_inches="tight")
+
+    plt.close(fig)
+
+    return {
+        "ee_pos": ee_pos,
+        "labels": labels,
+        "color_map": color_map,
+    }

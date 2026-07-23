@@ -1265,8 +1265,9 @@ class World:
             plot_dir = Path(video_path) / "task_map"
             plot_dir.mkdir(parents=True, exist_ok=True)
 
-            
             for env_idx in range(self.num_envs):
+                print("result_quat:", results["traj_bluebox_quat"][env_idx])
+                
                 plot_task_result_xy(
                     bluebox_traj=results["traj_bluebox_pos"][env_idx],
                     bluebox_quat_traj=results["traj_bluebox_quat"][env_idx],
@@ -1414,6 +1415,7 @@ class World:
                 
             if "bluebox_quat" in self.infos:
                 quat0 = np.asarray(self.infos["bluebox_quat"])
+                print("quat0:", quat0)
                 if quat0.ndim > 2:
                     quat0 = quat0[:, -1]
                 traj["bluebox_quat"].append(quat0.copy())
@@ -1560,6 +1562,12 @@ class World:
                     if blue.ndim > 2:
                         blue = blue[:, -1]
                     traj["bluebox_pos"].append(blue.copy())
+                    
+                if "bluebox_quat" in self.infos:
+                    quat = np.asarray(self.infos["bluebox_quat"])
+                    if quat.ndim > 2:
+                        quat = quat[:, -1]
+                    traj["bluebox_quat"].append(quat.copy())
 
                 if "ee_pos" in self.infos:
                     ee = np.asarray(self.infos["ee_pos"])

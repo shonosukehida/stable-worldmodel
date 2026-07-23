@@ -29,7 +29,7 @@ import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 
 from stable_worldmodel.utils import _make_env
-from stable_worldmodel.probing.plot import *
+from stable_worldmodel.probing.franka_push.plot import *
 
 
 
@@ -1319,6 +1319,128 @@ class ProbingEvaluator:
 
 
 
+    @torch.no_grad()
+    def collect_action_predictor_goal_cost_map(
+        self,
+        init_ee_pos,
+        init_bluebox_pos,
+        goal_ee_pos,
+        goal_bluebox_pos,
+        x_range=(0.45, 0.85),
+        y_range=(-0.20, 0.20),
+        z_value=0.05,
+        num_x=50,
+        num_y=50,
+        image_size=(64, 64),
+        pixel_key="pixels",
+        action_key=None,
+        cost_type="l2",
+    ):
+        """
+        初期状態 z_t から、各絶対位置 action=[x,y,z] を predictor に入力し、
+        predicted next latent と goal latent の距離を action 座標上に可視化するための cost_map を集める。
+        """
+
+        if self.env is None:
+            raise ValueError("self.env is None. Please pass env to ProbingEvaluator.")
+
+        if action_key is None:
+            action_key = self.action_key
+
+        init_ee_pos = np.asarray(init_ee_pos, dtype=np.float32)
+        init_bluebox_pos = np.asarray(init_bluebox_pos, dtype=np.float32)
+        goal_ee_pos = np.asarray(goal_ee_pos, dtype=np.float32)
+        goal_bluebox_pos = np.asarray(goal_bluebox_pos, dtype=np.float32)
+
+        xs = np.linspace(x_range[0], x_range[1], num_x, dtype=np.float32)
+        ys = np.linspace(y_range[0], y_range[1], num_y, dtype=np.float32)
+
+        # -------------------------
+        # initial latent z_t
+        # -------------------------
+        init_img = self.render_state_image(
+            ee_pos=init_ee_pos,
+            bluebox_pos=init_bluebox_pos,
+            image_size=image_size,
+            reset=True,
+        )
+        z_init = self.encode_rendered_image(init_img, pixel_key=pixel_key)  # (1, D)
+
+        # -------------------------
+        # goal latent z_g
+        # -------------------------
+        goal_img = self.render_state_image(
+            ee_pos=goal_ee_pos,
+            bluebox_pos=goal_bluebox_pos,
+            image_size=image_size,
+            reset=True,
+        )
+        z_goal = self.encode_rendered_image(goal_img, pixel_key=pixel_key)  # (1, D)
+
+        cost_map = np.zeros((num_x, num_y), dtype=np.float32)
+
+        min_cost = float("inf")
+        min_action_pos = None
+
+        for ix, x in enumerate(tqdm(xs, desc="Collecting action predictor goal cost map")):
+            for iy, y in enumerate(ys):
+                target_xyz = np.array([x, y, z_value], dtype=np.float32)
+
+                # 今回は action が絶対 cartesian 座標である前提
+                action_np = target_xyz[None, :].astype(np.float32)  # (1, 3)
+
+                # 学習時と同じ action normalization
+                if self.process is not None and action_key in self.process:
+                    action_np = self.process[action_key].transform(action_np)
+
+                action = torch.from_numpy(action_np).float().to(self.device)  # (1, A)
+                a_in = action.unsqueeze(0)  # (1, 1, A)
+
+                if hasattr(self.model, "action_encoder"):
+                    a_in = self.model.action_encoder(a_in)
+
+                z_in = z_init.unsqueeze(0)  # (1, 1, D)
+
+                z_pred = self.model.predictor(z_in, a_in)
+
+                while z_pred.ndim > 2:
+                    z_pred = z_pred.squeeze(0)
+
+                if hasattr(self.model, "pred_proj"):
+                    z_pred = self.model.pred_proj(z_pred)
+
+                diff = z_pred - z_goal
+
+                if cost_type == "mse":
+                    cost = diff.pow(2).mean().item()
+                elif cost_type == "l2":
+                    cost = diff.pow(2).sum().sqrt().item()
+                else:
+                    raise ValueError(f"Unknown cost_type: {cost_type}")
+
+                cost_map[ix, iy] = cost
+
+                if cost < min_cost:
+                    min_cost = cost
+                    min_action_pos = target_xyz.copy()
+
+        return {
+            "cost_map": cost_map,
+            "xs": xs,
+            "ys": ys,
+            "init_ee_pos": init_ee_pos,
+            "init_bluebox_pos": init_bluebox_pos,
+            "goal_ee_pos": goal_ee_pos,
+            "goal_bluebox_pos": goal_bluebox_pos,
+            "min_cost": min_cost,
+            "min_action_pos": min_action_pos,
+            "init_img": init_img,
+            "goal_img": goal_img,
+            "cost_type": cost_type,
+        }
+
+
+
 
     @torch.no_grad()
     def plot_dataset_pca_rgb(
@@ -1512,13 +1634,15 @@ class ProbingEvaluator:
             # (1,C,H,W) なら最後のフレームを使う
             if pixels.ndim == 4:
                 pixels = pixels[-1]
-
+            # print("(raw) pixels:", pixels.shape)
             raw_img = pixels.detach().cpu()
 
             if self.transform is not None:
                 pixels = self.transform[pixel_key](pixels)
+                # print("(after transform) pixels:", pixels.shape)
 
             pixels = pixels.unsqueeze(0).to(self.device)
+            # print("(encoder input) pixels:", pixels.shape)
 
             feat_map = self._encode_pixels_patch_map(
                 pixels,
@@ -1594,6 +1718,111 @@ class ProbingEvaluator:
             "feature_shape": (T, C, h, w),
             "explained_variance_ratio": expl,
         }
+
+
+
+    @torch.no_grad()
+    def collect_cross_position_latents(
+        self,
+        center=None,
+        radius=0.05,
+        num_per_axis=11,
+        bluebox_pos=None,
+        z_value=0.05,
+        image_size=(64, 64),
+        pixel_key="pixels",
+    ):
+        """
+        EE を十字状(+x, -x, +y, -y)に配置し、
+        各状態画像を render して encoder latent を collect する。
+
+        Returns:
+            {
+                "latents": (N, D),
+                "ee_pos": (N, 3),
+                "bluebox_pos": (3,),
+                "labels": (N,),
+                "images": list[H,W,C],
+            }
+        """
+        if self.env is None:
+            raise ValueError("self.env is None. Please pass env to ProbingEvaluator.")
+
+        if center is None:
+            center = np.array(
+                [
+                    (self.x_range[0] + self.x_range[1]) / 2.0,
+                    (self.y_range[0] + self.y_range[1]) / 2.0,
+                    z_value,
+                ],
+                dtype=np.float32,
+            )
+        else:
+            center = np.asarray(center, dtype=np.float32)
+
+        if bluebox_pos is None:
+            bluebox_pos = np.array([center[0], center[1], self.z_range[0]], dtype=np.float32)
+        else:
+            bluebox_pos = np.asarray(bluebox_pos, dtype=np.float32)
+
+        offsets = np.linspace(-radius, radius, num_per_axis, dtype=np.float32)
+
+        ee_positions = []
+        labels = []
+
+        # x軸方向
+        for dx in offsets:
+            pos = center.copy()
+            pos[0] = np.clip(center[0] + dx, self.x_range[0], self.x_range[1])
+            pos[1] = center[1]
+            pos[2] = z_value
+            ee_positions.append(pos)
+            labels.append("x_axis")
+
+        # y軸方向
+        for dy in offsets:
+            # center は x_axis 側ですでに入っているので重複を避ける
+            if abs(float(dy)) < 1e-8:
+                continue
+
+            pos = center.copy()
+            pos[0] = center[0]
+            pos[1] = np.clip(center[1] + dy, self.y_range[0], self.y_range[1])
+            pos[2] = z_value
+            ee_positions.append(pos)
+            labels.append("y_axis")
+
+        latents = []
+        images = []
+
+        for ee_pos in tqdm(ee_positions, desc="Collecting cross position latents"):
+            img = self.render_state_image(
+                ee_pos=ee_pos,
+                bluebox_pos=bluebox_pos,
+                image_size=image_size,
+                reset=True,
+            )
+
+            z = self.encode_rendered_image(
+                img,
+                pixel_key=pixel_key,
+            )
+
+            latents.append(z.squeeze(0).cpu().numpy())
+            images.append(img)
+
+        return {
+            "latents": np.stack(latents, axis=0),
+            "ee_pos": np.stack(ee_positions, axis=0),
+            "bluebox_pos": bluebox_pos,
+            "center": center,
+            "labels": np.asarray(labels),
+            "images": images,
+        }
+
+
+
+
     
     def run(self):
         
@@ -1823,28 +2052,78 @@ class ProbingEvaluator:
                 show_task_initial=self.config.check_ee_box_cost_map.show_task_initial, 
                 task_initial_box_pos=self.config.check_ee_box_cost_map.task_initial_box_pos,
             )
+        if self.config.check_ac_pred_cost_map.check: 
+            
+            action_pred_cost_data = self.collect_action_predictor_goal_cost_map(
+                init_ee_pos=self.config.check_ac_pred_cost_map.init_ee_pos,        # 作業領域中心など
+                init_bluebox_pos=self.config.check_ac_pred_cost_map.init_bluebox_pos,  # タスク初期box
+                goal_ee_pos=self.config.check_ac_pred_cost_map.goal_ee_pos,
+                goal_bluebox_pos=self.config.check_ac_pred_cost_map.goal_bluebox_pos,
+                x_range=self.x_range,
+                y_range=self.y_range,
+                z_value=self.z_range[0],
+                num_x=self.config.check_ac_pred_cost_map.num_x,
+                num_y=self.config.check_ac_pred_cost_map.num_y,
+                image_size=tuple(self.config.check_ac_pred_cost_map.image_size),
+                action_key=self.action_key,
+                cost_type="l2",
+            )
+
+            plot_action_predictor_goal_cost_map(
+                action_pred_cost_data,
+                save_path=self.results_path / "probing" / "action_predictor_goal_cost_map.png",
+            )
+            
+            
+            
+            
+        if self.config.encoder_rgb_pca.check:
+            # self.plot_dataset_pca_rgb(
+            #     max_samples=8,
+            #     is_val=True,
+            #     save_dir=self.results_path / "probing" / "pca_rgb_val",
+            #     title_prefix="val_pca_rgb",
+            #     layer_idx=None,      # 最終層
+            #     upsample=None,
+            # )
+            
+            out = self.make_dataset_sequence_pca_rgb_video(
+                start_idx=0,
+                horizon=50,
+                is_val=False,
+                save_path=self.results_path / "probing" / "pca_rgb_video" / "seq0_pca_rgb.mp4",
+                layer_idx=None,
+                upsample=(224, 224),
+                fps=4,
+            )
+
+            print(out)
 
 
-        # self.plot_dataset_pca_rgb(
-        #     max_samples=8,
-        #     is_val=True,
-        #     save_dir=self.results_path / "probing" / "pca_rgb_val",
-        #     title_prefix="val_pca_rgb",
-        #     layer_idx=None,      # 最終層
-        #     upsample=None,
-        # )
-        
-        out = self.make_dataset_sequence_pca_rgb_video(
-            start_idx=0,
-            horizon=50,
-            is_val=False,
-            save_path=self.results_path / "probing" / "pca_rgb_video" / "seq0_pca_rgb.mp4",
-            layer_idx=None,
-            upsample=(224, 224),
-            fps=4,
-        )
+        if self.config.plot_cross_position_latent_pca.check:
+            cross_data = self.collect_cross_position_latents(
+                radius=0.08,
+                num_per_axis=100,
+                bluebox_pos=[0.55, 0.0, 0.02],
+                z_value=self.z_range[0],
+            )
 
-        print(out)
-        
+            color_map = {
+                "x_axis": "C0",
+                "y_axis": "C1",
+            }
+
+            plot_cross_position_latent_pca_2d(
+                cross_data,
+                save_path=self.results_path / "probing" / "cross_position_latent_pca_2d.png",
+                title="Cross EE position encoder latent PCA 2D",
+            )
+
+            plot_cross_position_xy_trajectory(
+                cross_data,
+                save_path=self.results_path / "probing" / "cross_position_xy_trajectory.png",
+                title="Cross EE position trajectory",
+                color_map=color_map,
+            )
             
             
