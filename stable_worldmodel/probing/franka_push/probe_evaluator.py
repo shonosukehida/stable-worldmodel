@@ -116,7 +116,7 @@ class ProbingEvaluator:
         
         
         
-        
+
     @torch.no_grad()
     def collect_frame_latents(
         self,
