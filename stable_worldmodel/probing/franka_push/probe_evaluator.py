@@ -89,6 +89,8 @@ class ProbingEvaluator:
         
         self.closed_pred_step = self.config.closed_pred_step
         self.max_samples = self.config.max_samples 
+        
+        self.closed_pred_horizon = self.config.plot_horizon.closed_pred_horizon
         # print("self.max_samples: ", self.max_samples)
         
         self.plot_line = self.config.plot_line
@@ -1821,6 +1823,356 @@ class ProbingEvaluator:
         }
 
 
+    def _scalar_value(self, value):
+        if torch.is_tensor(value):
+            value = value.detach().cpu().numpy()
+
+        value = np.asarray(value)
+        return int(value.reshape(-1)[-1])
+
+
+    def _is_consecutive_transition(
+        self,
+        sample_t,
+        sample_tp1,
+    ):
+        """
+        2サンプルが同じepisode内の連続フレームか確認する。
+
+        episode/timestep情報が存在しない場合は、
+        dataset上で連続しているものとして扱う。
+        """
+        episode_keys = (
+            "episode_index",
+            "episode_idx",
+            "episode_id",
+        )
+
+        timestep_keys = (
+            "frame_index",
+            "timestep",
+            "time_index",
+            "step_idx",
+        )
+
+        for key in episode_keys:
+            if key in sample_t and key in sample_tp1:
+                ep_t = self._scalar_value(sample_t[key])
+                ep_tp1 = self._scalar_value(sample_tp1[key])
+
+                if ep_t != ep_tp1:
+                    return False
+
+                break
+
+        for key in timestep_keys:
+            if key in sample_t and key in sample_tp1:
+                t = self._scalar_value(sample_t[key])
+                tp1 = self._scalar_value(sample_tp1[key])
+
+                if tp1 != t + 1:
+                    return False
+
+                break
+
+        return True
+
+
+    @torch.no_grad()
+    def collect_episode_closed_rollout_whiskers(
+        self,
+        start_idx=0,
+        pred_step=5,
+        plot_interval=5,
+        max_episode_steps=None,
+        pixel_key="pixels",
+        action_key=None,
+        is_val=False,
+    ):
+        """
+        start_idxが属する1 episodeについて、
+
+        1. episode全体のEncoder軌跡を収集
+        2. plot_intervalフレームごとに
+        pred_step-step closed-loop rolloutを収集
+
+        Returns:
+            episode_true_z:
+                (L, D)
+
+            true_rollouts:
+                list[(pred_step + 1, D)]
+
+            pred_rollouts:
+                list[(pred_step + 1, D)]
+
+            actions:
+                list[(pred_step, A)]
+
+            rollout_start_positions:
+                (N,)
+
+            rollout_start_indices:
+                (N,)
+        """
+        if action_key is None:
+            action_key = self.action_key
+
+        if pred_step <= 0:
+            raise ValueError(
+                f"pred_step must be positive, got {pred_step}"
+            )
+
+        if plot_interval <= 0:
+            raise ValueError(
+                f"plot_interval must be positive, got {plot_interval}"
+            )
+
+        dataset = self._get_dataset(is_val)
+
+        if start_idx < 0 or start_idx >= len(dataset):
+            raise ValueError(
+                f"Invalid start_idx={start_idx}, "
+                f"len(dataset)={len(dataset)}"
+            )
+
+        # =========================================================
+        # start_idxからepisode終端までを特定
+        # =========================================================
+        episode_indices = [start_idx]
+        idx = start_idx
+
+        while idx + 1 < len(dataset):
+            if (
+                max_episode_steps is not None
+                and len(episode_indices) >= max_episode_steps
+            ):
+                break
+
+            sample_t = dataset[idx]
+            sample_tp1 = dataset[idx + 1]
+
+            if not self._is_consecutive_transition(
+                sample_t,
+                sample_tp1,
+            ):
+                break
+
+            idx += 1
+            episode_indices.append(idx)
+
+        if len(episode_indices) < pred_step + 1:
+            raise RuntimeError(
+                f"Episode is too short for pred_step={pred_step}: "
+                f"episode length={len(episode_indices)}"
+            )
+
+        # =========================================================
+        # 画像前処理
+        # =========================================================
+        def prepare_pixels(sample):
+            pixels = sample[pixel_key]
+
+            # historyがある場合は最新フレーム
+            if pixels.ndim == 4:
+                pixels = pixels[-1]
+
+            if self.transform is not None:
+                pixels = self.transform[pixel_key](pixels)
+
+            return pixels.unsqueeze(0).to(self.device)
+
+        # =========================================================
+        # action前処理
+        # =========================================================
+        def prepare_action(sample):
+            action = sample[action_key]
+
+            if torch.is_tensor(action):
+                action_np = action.detach().cpu().numpy()
+            else:
+                action_np = np.asarray(action)
+
+            # historyがある場合は最新action
+            if action_np.ndim == 2:
+                action_np = action_np[-1]
+
+            if action_np.ndim != 1:
+                raise ValueError(
+                    f"Unexpected action shape: {action_np.shape}"
+                )
+
+            action_np = action_np[None, :]
+
+            if (
+                self.process is not None
+                and action_key in self.process
+            ):
+                action_np = self.process[action_key].transform(
+                    action_np
+                )
+
+            return torch.from_numpy(
+                np.asarray(action_np, dtype=np.float32)
+            ).to(self.device)
+
+        # =========================================================
+        # Predictor 1-step
+        # =========================================================
+        def predict_next(z_cur, action):
+            z_in = z_cur.unsqueeze(1)       # (1,1,D)
+            action_in = action.unsqueeze(1) # (1,1,A)
+
+            if hasattr(self.model, "action_encoder"):
+                action_in = self.model.action_encoder(action_in)
+
+            z_next = self.model.predictor(
+                z_in,
+                action_in,
+            )
+
+            if z_next.ndim == 3 and z_next.shape[1] == 1:
+                z_next = z_next[:, 0]
+
+            while z_next.ndim > 2 and z_next.shape[0] == 1:
+                z_next = z_next.squeeze(0)
+
+            if z_next.ndim == 1:
+                z_next = z_next.unsqueeze(0)
+
+            if z_next.ndim != 2:
+                raise RuntimeError(
+                    f"Unexpected predictor output shape: "
+                    f"{tuple(z_next.shape)}"
+                )
+
+            if hasattr(self.model, "pred_proj"):
+                z_next = self.model.pred_proj(z_next)
+
+            return z_next
+
+        # =========================================================
+        # episode全体のEncoder軌跡
+        # =========================================================
+        episode_true_list = []
+
+        for idx in tqdm(
+            episode_indices,
+            desc="Encoding Franka episode trajectory",
+        ):
+            pixels = prepare_pixels(dataset[idx])
+            z = self._encode_pixels(pixels)
+
+            episode_true_list.append(
+                z.squeeze(0).cpu().numpy()
+            )
+
+        episode_true_z = np.stack(
+            episode_true_list,
+            axis=0,
+        )
+
+        # =========================================================
+        # 各開始位置から短期closed-loop rollout
+        # =========================================================
+        true_rollouts = []
+        pred_rollouts = []
+        action_rollouts = []
+        rollout_start_positions = []
+        rollout_start_indices = []
+
+        # 必ず完全なpred_step-step rolloutを作れる位置だけ使用
+        last_valid_start = (
+            len(episode_indices) - pred_step - 1
+        )
+
+        for start_pos in tqdm(
+            range(
+                0,
+                last_valid_start + 1,
+                plot_interval,
+            ),
+            desc="Collecting Franka closed-loop whiskers",
+        ):
+            start_dataset_idx = episode_indices[start_pos]
+
+            # episode_true_zと同じ初期潜在を使う
+            initial_z_np = episode_true_z[start_pos]
+
+            pred_current_z = torch.from_numpy(
+                initial_z_np
+            ).float().unsqueeze(0).to(self.device)
+
+            true_seq = [initial_z_np.copy()]
+            pred_seq = [initial_z_np.copy()]
+            action_seq = []
+
+            for h in range(pred_step):
+                current_pos = start_pos + h
+                next_pos = current_pos + 1
+
+                idx_t = episode_indices[current_pos]
+
+                # 真値はすでにepisode全体についてencode済み
+                true_next_z_np = episode_true_z[next_pos]
+
+                action = prepare_action(dataset[idx_t])
+
+                pred_next_z = predict_next(
+                    pred_current_z,
+                    action,
+                )
+
+                true_seq.append(
+                    true_next_z_np.copy()
+                )
+
+                pred_seq.append(
+                    pred_next_z.squeeze(0).cpu().numpy()
+                )
+
+                action_seq.append(
+                    action.squeeze(0).cpu().numpy()
+                )
+
+                # autoregressive prediction
+                pred_current_z = pred_next_z
+
+            true_rollouts.append(
+                np.stack(true_seq, axis=0)
+            )
+
+            pred_rollouts.append(
+                np.stack(pred_seq, axis=0)
+            )
+
+            action_rollouts.append(
+                np.stack(action_seq, axis=0)
+            )
+
+            rollout_start_positions.append(start_pos)
+            rollout_start_indices.append(start_dataset_idx)
+
+        if len(pred_rollouts) == 0:
+            raise RuntimeError(
+                "No Franka closed-loop whiskers were collected."
+            )
+
+        return {
+            "episode_true_z": episode_true_z,
+            "true_rollouts": true_rollouts,
+            "pred_rollouts": pred_rollouts,
+            "actions": action_rollouts,
+            "episode_indices": np.asarray(episode_indices),
+            "rollout_start_positions": np.asarray(
+                rollout_start_positions
+            ),
+            "rollout_start_indices": np.asarray(
+                rollout_start_indices
+            ),
+            "pred_step": pred_step,
+            "plot_interval": plot_interval,
+        }
 
 
     
@@ -1896,24 +2248,91 @@ class ProbingEvaluator:
                     save_path=self.results_path / "probing" / "dataset_one_step_dynamics_pca_3d_enc_fit.png",
                     title="Dataset one-step dynamics PCA",
                 )
-            
+
+
             if self.plot_closed_data:
-                dataset_closed_dyn_data = self.collect_dataset_closed_rollout_latents(
-                        pred_step=self.closed_pred_step,
-                        max_samples = self.max_samples,
-                        action_key = self.action_key,
+                if self.config.plot_horizon.plot:
+                    print("self.config.plot_horizon plotting")
+                    
+                    closed_rollout_data = self.collect_closed_rollout_latents(
+                        start_idx=0,  # 可視化したい開始位置
+                        max_horizon=self.closed_pred_horizon,
+                        pixel_key="pixels",
+                        action_key=self.action_key,
+                        is_val=False,
+                    )
+
+                    closed_true_z = closed_rollout_data["true_z"]   # (H, D)
+                    closed_pred_z = closed_rollout_data["pred_z"]   # (H+1, D)
+
+                    print("closed_true_z.shape:", closed_true_z.shape)
+                    print("closed_pred_z.shape:", closed_pred_z.shape)
+
+                    # 最後の予測だけ対応するtrueがないので除外
+                    closed_pred_z = closed_pred_z[: closed_true_z.shape[0]]
+
+                    assert closed_true_z.shape == closed_pred_z.shape
+
+                    single_rollout_data = {
+                        "true_z": closed_true_z,
+                        "pred_z": closed_pred_z,
+                        "actions": closed_rollout_data["actions"],
+                    }
+
+                    closed_plot_result = plot_closed_loop_rollout_pca(
+                        single_rollout_data,
+                        save_path=self.results_path / "probing" / "closed_loop_pca.png",
+                        title="Franka Push Closed-loop Dynamics",
+                        draw_connections=False,
+                    )
+
+                
+                if self.config.plot_whisker.plot:
+                
+                    
+                    episode_closed_data = (
+                        self.collect_episode_closed_rollout_whiskers(
+                            start_idx=0,
+                            pred_step=self.config.plot_whisker.pred_step,
+                            plot_interval=1,
+                            max_episode_steps=None,
+                            pixel_key="pixels",
+                            action_key=self.action_key,
+                            is_val=False,
+                        )
+                    )
+
+                    whisker_plot_result = (
+                        plot_episode_closed_rollout_whiskers_pca(
+                            episode_closed_data,
+                            save_path=(
+                                self.results_path
+                                / "probing"
+                                / "dataset_closed_dynamics_whiskers_pca_3d.png"
+                            ),
+                            title="Franka Push Closed-loop Dynamics",
+                            draw_true_segments=False,
+                            draw_endpoint_connections=True,
+                        )
                     )
                 
+                if self.config.plot_all_episode.plot:
+                    
+                    dataset_closed_dyn_data = self.collect_dataset_closed_rollout_latents(
+                            pred_step=self.config.plot_all_episode.pred_step,
+                            max_samples = self.max_samples,
+                            action_key = self.action_key,
+                        )
+                    
 
+                    
+                    plot_rollout_pca_enc_fit(
+                        dataset_closed_dyn_data,
+                        save_path=self.results_path / "probing" / "dataset_closed_dynamics_pca_3d_enc_fit.png",
+                        title="Dataset closed dynamics PCA",
+                        plot_line = self.plot_line
+                    )
                 
-                plot_rollout_pca_enc_fit(
-                    dataset_closed_dyn_data,
-                    save_path=self.results_path / "probing" / "dataset_closed_dynamics_pca_3d_enc_fit.png",
-                    title="Dataset closed dynamics PCA",
-                    plot_line = self.plot_line
-                )
-                
-
 
 
         if self.plot_all_val_data:
@@ -1932,18 +2351,78 @@ class ProbingEvaluator:
                 )
             
             if self.plot_closed_data:
-                val_dataset_closed_dyn_data = self.collect_dataset_closed_rollout_latents(
-                        pred_step=self.closed_pred_step,
-                        max_samples = self.max_samples,
-                        action_key = self.action_key,
+                
+                if self.config.plot_horizon.plot:
+                    
+                    closed_rollout_data = self.collect_closed_rollout_latents(
+                        start_idx=0,  # 可視化したい開始位置
+                        max_horizon=self.closed_pred_horizon,
+                        pixel_key="pixels",
+                        action_key=self.action_key,
                         is_val=True,
                     )
-                plot_rollout_pca_enc_fit(
-                    val_dataset_closed_dyn_data,
-                    save_path=self.results_path / "probing" / "val_dataset_closed_dynamics_pca_3d_enc_fit.png",
-                    title="Dataset closed dynamics PCA",
-                    plot_line = self.plot_line,
-                )
+
+                    closed_true_z = closed_rollout_data["true_z"]
+                    closed_pred_z = closed_rollout_data["pred_z"]
+
+                    assert closed_true_z.shape == closed_pred_z.shape
+
+                    
+                    rollout_idx = 0 # 可視化するエピソード
+
+                    single_rollout_data = {
+                        "true_z": closed_true_z[rollout_idx],
+                        "pred_z": closed_pred_z[rollout_idx],
+                        "actions": closed_rollout_data["actions"][rollout_idx],
+                    }
+
+                    closed_plot_result = plot_closed_loop_rollout_pca(
+                        single_rollout_data,
+                        save_path=self.results_path / "closed_loop_pca.png",
+                        title="Franka Push Closed-loop Dynamics",
+                        draw_connections=False,
+                    )
+                
+                if self.config.plot_whisker.plot:
+
+                    val_episode_closed_data = (
+                        self.collect_episode_closed_rollout_whiskers(
+                            start_idx=0,
+                            pred_step=self.closed_pred_step,
+                            plot_interval=1,
+                            max_episode_steps=None,
+                            pixel_key="pixels",
+                            action_key=self.action_key,
+                            is_val=True,
+                        )
+                    )
+
+                    plot_episode_closed_rollout_whiskers_pca(
+                        val_episode_closed_data,
+                        save_path=(
+                            self.results_path
+                            / "probing"
+                            / "val_dataset_closed_dynamics_whiskers_pca_3d.png"
+                        ),
+                        title="Franka Push Validation Closed-loop Dynamics",
+                        draw_true_segments=False,
+                        draw_endpoint_connections=True,
+                    )
+                
+                if self.config.plot_all_episode.plot:
+                    val_dataset_closed_dyn_data = self.collect_dataset_closed_rollout_latents(
+                            pred_step=self.closed_pred_step,
+                            max_samples = self.max_samples,
+                            action_key = self.action_key,
+                            is_val=True,
+                        )
+                    plot_rollout_pca_enc_fit(
+                        val_dataset_closed_dyn_data,
+                        save_path=self.results_path / "probing" / "val_dataset_closed_dynamics_pca_3d_enc_fit.png",
+                        title="Dataset closed dynamics PCA",
+                        plot_line = self.plot_line,
+                    )
+
                 
                 
         direction_data = self.collect_center_direction_rollouts(
@@ -2078,14 +2557,6 @@ class ProbingEvaluator:
             
             
         if self.config.encoder_rgb_pca.check:
-            # self.plot_dataset_pca_rgb(
-            #     max_samples=8,
-            #     is_val=True,
-            #     save_dir=self.results_path / "probing" / "pca_rgb_val",
-            #     title_prefix="val_pca_rgb",
-            #     layer_idx=None,      # 最終層
-            #     upsample=None,
-            # )
             
             out = self.make_dataset_sequence_pca_rgb_video(
                 start_idx=0,

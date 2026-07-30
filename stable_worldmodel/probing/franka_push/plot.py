@@ -1702,3 +1702,519 @@ def plot_cross_position_xy_trajectory(
         "labels": labels,
         "color_map": color_map,
     }
+    
+
+
+def plot_episode_closed_rollout_whiskers_pca(
+    rollout_data,
+    save_path=None,
+    title="Franka Push Closed-loop Dynamics",
+    draw_true_segments=False,
+    draw_endpoint_connections=True,
+):
+    """
+    episode全体のEncoder軌跡を幹として、
+    各開始時刻からの短期closed-loop予測を髭状に描く。
+    """
+    episode_true_z = np.asarray(
+        rollout_data["episode_true_z"]
+    )
+
+    pred_rollouts = rollout_data["pred_rollouts"]
+    true_rollouts = rollout_data["true_rollouts"]
+
+    start_positions = np.asarray(
+        rollout_data["rollout_start_positions"]
+    )
+
+    if episode_true_z.ndim != 2:
+        raise ValueError(
+            f"episode_true_z must be (L,D), "
+            f"got {episode_true_z.shape}"
+        )
+
+    if len(pred_rollouts) != len(true_rollouts):
+        raise ValueError(
+            "pred_rollouts and true_rollouts length mismatch."
+        )
+
+    if len(pred_rollouts) != len(start_positions):
+        raise ValueError(
+            "rollout_start_positions length mismatch."
+        )
+
+    if episode_true_z.shape[0] < 3:
+        raise ValueError(
+            "At least 3 episode samples are required "
+            "for 3D PCA."
+        )
+
+    # =========================================================
+    # PCAはepisode全体のEncoder表現だけでfit
+    # =========================================================
+    pca = PCA(n_components=3)
+
+    episode_true_pca = pca.fit_transform(
+        episode_true_z
+    )
+
+    pred_rollouts_pca = [
+        pca.transform(np.asarray(seq))
+        for seq in pred_rollouts
+    ]
+
+    true_rollouts_pca = [
+        pca.transform(np.asarray(seq))
+        for seq in true_rollouts
+    ]
+
+    explained = pca.explained_variance_ratio_
+
+    fig = plt.figure(figsize=(11, 9))
+    ax = fig.add_subplot(
+        111,
+        projection="3d",
+    )
+
+    # =========================================================
+    # episode全体のEncoder軌跡 = 幹
+    # =========================================================
+    ax.plot(
+        episode_true_pca[:, 0],
+        episode_true_pca[:, 1],
+        episode_true_pca[:, 2],
+        color="black",
+        linewidth=2.5,
+        alpha=0.9,
+        label="Encoder episode trajectory",
+        zorder=3,
+    )
+
+    ax.scatter(
+        episode_true_pca[0, 0],
+        episode_true_pca[0, 1],
+        episode_true_pca[0, 2],
+        color="black",
+        marker="o",
+        s=90,
+        label="Episode start",
+        zorder=5,
+    )
+
+    ax.scatter(
+        episode_true_pca[-1, 0],
+        episode_true_pca[-1, 1],
+        episode_true_pca[-1, 2],
+        color="black",
+        marker="s",
+        s=80,
+        label="Episode end",
+        zorder=5,
+    )
+
+    # =========================================================
+    # 各短期closed-loop rollout = 髭
+    # =========================================================
+    for i, (pred_seq, true_seq) in enumerate(
+        zip(
+            pred_rollouts_pca,
+            true_rollouts_pca,
+        )
+    ):
+        ax.plot(
+            pred_seq[:, 0],
+            pred_seq[:, 1],
+            pred_seq[:, 2],
+            color="firebrick",
+            linewidth=1.0,
+            alpha=1,
+            label=(
+                "Closed-loop prediction"
+                if i == 0
+                else None
+            ),
+            zorder=2,
+        )
+
+        # 予測終端
+        ax.scatter(
+            pred_seq[-1, 0],
+            pred_seq[-1, 1],
+            pred_seq[-1, 2],
+            color="firebrick",
+            marker="x",
+            s=22,
+            alpha=1,
+            zorder=4,
+        )
+
+        # 対応する真の短期区間
+        if draw_true_segments:
+            ax.plot(
+                true_seq[:, 0],
+                true_seq[:, 1],
+                true_seq[:, 2],
+                color="gray",
+                linewidth=0.8,
+                linestyle="--",
+                alpha=0.25,
+                label=(
+                    "Corresponding true segment"
+                    if i == 0
+                    else None
+                ),
+                zorder=1,
+            )
+
+        # 予測終端と真の終端を結ぶ
+        if draw_endpoint_connections:
+            ax.plot(
+                [
+                    true_seq[-1, 0],
+                    pred_seq[-1, 0],
+                ],
+                [
+                    true_seq[-1, 1],
+                    pred_seq[-1, 1],
+                ],
+                [
+                    true_seq[-1, 2],
+                    pred_seq[-1, 2],
+                ],
+                color="gray",
+                linewidth=0.6,
+                alpha=0.25,
+                zorder=1,
+            )
+
+    pred_step = rollout_data.get(
+        "pred_step",
+        None,
+    )
+
+    plot_interval = rollout_data.get(
+        "plot_interval",
+        None,
+    )
+
+    subtitle = []
+
+    if pred_step is not None:
+        subtitle.append(
+            f"prediction horizon: {pred_step} steps"
+        )
+
+    if plot_interval is not None:
+        subtitle.append(
+            f"start interval: {plot_interval} frames"
+        )
+
+    subtitle.append(
+        "explained variance: "
+        f"{explained[0]:.3f}, "
+        f"{explained[1]:.3f}, "
+        f"{explained[2]:.3f}"
+    )
+
+    ax.set_title(
+        title + "\n" + "\n".join(subtitle)
+    )
+
+    ax.set_xlabel("PC1")
+    ax.set_ylabel("PC2")
+    ax.set_zlabel("PC3")
+    ax.legend()
+
+    fig.tight_layout()
+
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        fig.savefig(
+            save_path,
+            dpi=200,
+            bbox_inches="tight",
+        )
+
+    plt.close(fig)
+
+    return {
+        "pca": pca,
+        "episode_true_pca": episode_true_pca,
+        "pred_rollouts_pca": pred_rollouts_pca,
+        "true_rollouts_pca": true_rollouts_pca,
+        "explained_variance_ratio": explained,
+    }
+
+
+def plot_closed_loop_rollout_pca(
+    rollout_data,
+    save_path=None,
+    title="Closed-loop Dynamics",
+    true_key="true_z",
+    pred_key="pred_z",
+    draw_connections=False,
+    connection_interval=1,
+    font_size=12,
+):
+    """
+    1本の closed-loop rollout を3次元PCA空間に可視化する。
+
+    想定入力:
+        rollout_data[true_key]: (H + 1, D)
+        rollout_data[pred_key]: (H + 1, D)
+
+    PCAはEncoder軌跡 true_z のみにfitし、
+    Predictor軌跡 pred_z は同じPCAでtransformする。
+
+    Args:
+        rollout_data:
+            true_z, pred_zを含むdict。
+
+        save_path:
+            画像の保存先。Noneの場合は保存しない。
+
+        title:
+            図のタイトル。
+
+        true_key:
+            Encoder潜在表現のキー。
+
+        pred_key:
+            Predictor潜在表現のキー。
+
+        draw_connections:
+            同じhorizonのEncoder点とPredictor点を線で結ぶか。
+
+        connection_interval:
+            connectionを何stepごとに描くか。
+
+        font_size:
+            始点・終点ラベルのフォントサイズ。
+
+    Returns:
+        {
+            "pca": PCA object,
+            "true_pca": (H + 1, 3),
+            "pred_pca": (H + 1, 3),
+            "explained_variance_ratio": (3,),
+        }
+    """
+    true_z = np.asarray(rollout_data[true_key])
+    pred_z = np.asarray(rollout_data[pred_key])
+
+    if true_z.ndim != 2:
+        raise ValueError(
+            f"{true_key} must have shape (T, D), "
+            f"but got {true_z.shape}"
+        )
+
+    if pred_z.ndim != 2:
+        raise ValueError(
+            f"{pred_key} must have shape (T, D), "
+            f"but got {pred_z.shape}"
+        )
+
+    if true_z.shape[1] != pred_z.shape[1]:
+        raise ValueError(
+            "Latent dimensions do not match: "
+            f"true_z.shape={true_z.shape}, "
+            f"pred_z.shape={pred_z.shape}"
+        )
+
+    if connection_interval <= 0:
+        raise ValueError(
+            "connection_interval must be positive, "
+            f"got {connection_interval}"
+        )
+
+    # 長さが異なる場合にも安全に描画できるよう、短い方へ揃える
+    plot_length = min(
+        true_z.shape[0],
+        pred_z.shape[0],
+    )
+
+    if plot_length < 3:
+        raise ValueError(
+            "At least 3 latent states are required for 3D PCA, "
+            f"but got plot_length={plot_length}"
+        )
+
+    true_z_plot = true_z[:plot_length]
+    pred_z_plot = pred_z[:plot_length]
+
+    if true_z_plot.shape[1] < 3:
+        raise ValueError(
+            "Latent dimension must be at least 3 for 3D PCA, "
+            f"but got D={true_z_plot.shape[1]}"
+        )
+
+    # ------------------------------------------------------------
+    # PCAはEncoder軌跡だけでfit
+    # ------------------------------------------------------------
+    pca = PCA(n_components=3)
+
+    true_pca = pca.fit_transform(true_z_plot)
+    pred_pca = pca.transform(pred_z_plot)
+
+    explained_variance_ratio = pca.explained_variance_ratio_
+
+    # ------------------------------------------------------------
+    # Plot
+    # ------------------------------------------------------------
+    fig = plt.figure(figsize=(9, 8))
+    ax = fig.add_subplot(111, projection="3d")
+
+    ax.plot(
+        true_pca[:, 0],
+        true_pca[:, 1],
+        true_pca[:, 2],
+        color="black",
+        linewidth=2.0,
+        label="Encoder",
+    )
+
+    ax.plot(
+        pred_pca[:, 0],
+        pred_pca[:, 1],
+        pred_pca[:, 2],
+        color="firebrick",
+        linewidth=2.0,
+        label="Predictor",
+    )
+
+    # ------------------------------------------------------------
+    # 同じhorizonのEncoderとPredictorを接続
+    # ------------------------------------------------------------
+    if draw_connections:
+        for h in range(
+            0,
+            plot_length,
+            connection_interval,
+        ):
+            ax.plot(
+                [
+                    true_pca[h, 0],
+                    pred_pca[h, 0],
+                ],
+                [
+                    true_pca[h, 1],
+                    pred_pca[h, 1],
+                ],
+                [
+                    true_pca[h, 2],
+                    pred_pca[h, 2],
+                ],
+                color="gray",
+                linewidth=0.8,
+                alpha=0.35,
+            )
+
+    # ------------------------------------------------------------
+    # Start point
+    # true_z[0] == pred_z[0] のため、共通の始点として描く
+    # ------------------------------------------------------------
+    ax.scatter(
+        true_pca[0, 0],
+        true_pca[0, 1],
+        true_pca[0, 2],
+        color="black",
+        marker="o",
+        s=55,
+    )
+
+    ax.text(
+        true_pca[0, 0],
+        true_pca[0, 1],
+        true_pca[0, 2],
+        " S",
+        color="black",
+        fontsize=font_size,
+        fontweight="bold",
+    )
+
+    # ------------------------------------------------------------
+    # Encoder end point
+    # ------------------------------------------------------------
+    ax.scatter(
+        true_pca[-1, 0],
+        true_pca[-1, 1],
+        true_pca[-1, 2],
+        color="black",
+        marker="o",
+        s=55,
+    )
+
+    ax.text(
+        true_pca[-1, 0],
+        true_pca[-1, 1],
+        true_pca[-1, 2],
+        " E",
+        color="black",
+        fontsize=font_size,
+        fontweight="bold",
+    )
+
+    # ------------------------------------------------------------
+    # Predictor end point
+    # ------------------------------------------------------------
+    ax.scatter(
+        pred_pca[-1, 0],
+        pred_pca[-1, 1],
+        pred_pca[-1, 2],
+        color="firebrick",
+        marker="x",
+        s=70,
+        linewidths=2.0,
+    )
+
+    ax.text(
+        pred_pca[-1, 0],
+        pred_pca[-1, 1],
+        pred_pca[-1, 2],
+        " E",
+        color="firebrick",
+        fontsize=font_size,
+        fontweight="bold",
+    )
+
+    ax.set_title(
+        f"{title}\n"
+        f"var exp: "
+        f"{explained_variance_ratio[0]:.3f}, "
+        f"{explained_variance_ratio[1]:.3f}, "
+        f"{explained_variance_ratio[2]:.3f}"
+    )
+
+    ax.set_xlabel("PC1")
+    ax.set_ylabel("PC2")
+    ax.set_zlabel("PC3")
+    ax.legend()
+
+    fig.tight_layout()
+
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        fig.savefig(
+            save_path,
+            dpi=200,
+            bbox_inches="tight",
+        )
+
+    plt.close(fig)
+
+    return {
+        "pca": pca,
+        "true_pca": true_pca,
+        "pred_pca": pred_pca,
+        "explained_variance_ratio": explained_variance_ratio,
+    }
