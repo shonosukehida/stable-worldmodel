@@ -1605,7 +1605,7 @@ class ProbingEvaluator:
             
             if self.config.plot_closed_data.plot_whisker.plot:
 
-
+                print("self.config.plot_closed_data.plot_whisker.plot")
                 episode_closed_data = self.collect_episode_closed_rollouts(
                     start_idx=0,
                     pred_step=self.config.plot_closed_data.plot_whisker.pred_step,
@@ -1748,7 +1748,7 @@ class ProbingEvaluator:
                 )
             
             if self.config.plot_closed_data.plot_whisker.plot:
-
+                
                 episode_closed_data = self.collect_episode_closed_rollouts(
                     start_idx=0,
                     pred_step=self.config.plot_closed_data.plot_whisker.pred_step,
@@ -1878,7 +1878,7 @@ class ProbingEvaluator:
                 start_idx=0,
                 horizon=self.config.encoder_rgb_pca.horizon,
                 pixel_key="pixels",
-                is_val=False,
+                is_val=self.config.encoder_rgb_pca.is_val,
                 save_path=(
                     self.results_path
                     / "probing" / "flip_mug_encoder_pca_rgb.mp4"
