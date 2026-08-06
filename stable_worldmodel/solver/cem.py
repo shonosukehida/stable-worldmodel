@@ -73,10 +73,10 @@ class CEMSolver:
         self._norm_high = torch.as_tensor(norm_high, dtype=torch.float32, device=self.device)
         self.clip_action = config.clip_action
 
-        print("mean:", mean)
-        print("scale:", scale)
-        print("norm_low:", self._norm_low)
-        print("norm_high:", self._norm_high)
+        # print("mean:", mean)
+        # print("scale:", scale)
+        # print("norm_low:", self._norm_low)
+        # print("norm_high:", self._norm_high)
 
         if not isinstance(action_space, Box):
             logging.warning(f"Action space is discrete, got {type(action_space)}. CEMSolver may not work as expected.")
