@@ -1584,13 +1584,13 @@ class ProbingEvaluator:
 
                 plot_result = plot_one_step_rollout_pca(
                     rollout_data,
-                    save_path=save_dir / "one_step_pca.png",
+                    save_path=save_dir / "train_one_step_pca.png",
                     title="Flip Mug One-step Dynamics",
                     draw_connections=False,
                 )
 
                 np.savez_compressed(
-                    save_dir / "one_step_rollout_data.npz",
+                    save_dir / "train_one_step_rollout_data.npz",
                     current_z=rollout_data["current_z"],
                     true_z=rollout_data["true_z"],
                     pred_z=rollout_data["pred_z"],
@@ -1605,7 +1605,6 @@ class ProbingEvaluator:
             
             if self.config.plot_closed_data.plot_whisker.plot:
 
-                print("self.config.plot_closed_data.plot_whisker.plot")
                 episode_closed_data = self.collect_episode_closed_rollouts(
                     start_idx=0,
                     pred_step=self.config.plot_closed_data.plot_whisker.pred_step,
@@ -1620,7 +1619,7 @@ class ProbingEvaluator:
                         episode_closed_data,
                         save_path=(
                             save_dir
-                            / "closed_loop_whiskers_pca.png"
+                            / "train_closed_loop_whiskers_pca.png"
                         ),
                         title="Flip Mug 5-step Closed-loop Dynamics",
                         draw_true_segments=False,
@@ -1660,13 +1659,13 @@ class ProbingEvaluator:
 
                 closed_plot_result = plot_closed_loop_rollout_pca(
                     closed_rollout_data,
-                    save_path=save_dir / "closed_loop_pca.png",
+                    save_path=save_dir / "train_closed_loop_pca.png",
                     title="Flip Mug Closed-loop Dynamics",
                     draw_connections=False,
                 )
 
                 np.savez_compressed(
-                    save_dir / "closed_loop_rollout_data.npz",
+                    save_dir / "train_closed_loop_rollout_data.npz",
                     true_z=closed_true_z,
                     pred_z=closed_pred_z,
                     actions=closed_rollout_data["actions"],
@@ -1728,13 +1727,13 @@ class ProbingEvaluator:
 
                 plot_result = plot_one_step_rollout_pca(
                     rollout_data,
-                    save_path=save_dir / "one_step_pca.png",
+                    save_path=save_dir / "val_one_step_pca.png",
                     title="Flip Mug One-step Dynamics",
                     draw_connections=False,
                 )
 
                 np.savez_compressed(
-                    save_dir / "one_step_rollout_data.npz",
+                    save_dir / "val_one_step_rollout_data.npz",
                     current_z=rollout_data["current_z"],
                     true_z=rollout_data["true_z"],
                     pred_z=rollout_data["pred_z"],
@@ -1763,7 +1762,7 @@ class ProbingEvaluator:
                         episode_closed_data,
                         save_path=(
                             save_dir
-                            / "closed_loop_whiskers_pca.png"
+                            / "val_closed_loop_whiskers_pca.png"
                         ),
                         title="Flip Mug 5-step Closed-loop Dynamics",
                         draw_true_segments=False,
@@ -1803,13 +1802,13 @@ class ProbingEvaluator:
 
                 closed_plot_result = plot_closed_loop_rollout_pca(
                     closed_rollout_data,
-                    save_path=save_dir / "closed_loop_pca.png",
+                    save_path=save_dir / "val_closed_loop_pca.png",
                     title="Flip Mug Closed-loop Dynamics",
                     draw_connections=False,
                 )
 
                 np.savez_compressed(
-                    save_dir / "closed_loop_rollout_data.npz",
+                    save_dir / "val_closed_loop_rollout_data.npz",
                     true_z=closed_true_z,
                     pred_z=closed_pred_z,
                     actions=closed_rollout_data["actions"],
@@ -1854,13 +1853,13 @@ class ProbingEvaluator:
 
                 closed_plot_result = plot_closed_loop_rollout_pca(
                     closed_rollout_data,
-                    save_path=save_dir / "closed_loop_pca.png",
+                    save_path=save_dir / "val_closed_loop_pca.png",
                     title="Flip Mug Closed-loop Dynamics",
                     draw_connections=False,
                 )
 
                 np.savez_compressed(
-                    save_dir / "closed_loop_rollout_data.npz",
+                    save_dir / "val_closed_loop_rollout_data.npz",
                     true_z=closed_true_z,
                     pred_z=closed_pred_z,
                     actions=closed_rollout_data["actions"],
