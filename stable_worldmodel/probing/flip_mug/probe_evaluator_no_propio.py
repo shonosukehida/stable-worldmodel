@@ -82,17 +82,6 @@ class ProbingEvaluator:
             else:
                 value_np = np.asarray(value)
                 print(f"{key}: shape={value_np.shape}, dtype={value_np.dtype}")
-                
-        self._validate_dataset_sample(
-            self.dataset,
-            "training",
-        )
-
-        if self.val_dataset is not None:
-            self._validate_dataset_sample(
-                self.val_dataset,
-                "validation",
-            )
 
 
     @torch.no_grad()
@@ -158,12 +147,13 @@ class ProbingEvaluator:
         # 初期状態 z_0 を true/pred の両方に保存
         # -------------------------------------------------
         initial_sample = dataset[start_idx]
-        
-        initial_z = self._encode_state(
-            initial_sample,
+
+        initial_pixels = self._prepare_pixels(
+            initial_sample[pixel_key],
             pixel_key=pixel_key,
-            proprio_key="proprio",
         )
+
+        initial_z = self._encode_pixels(initial_pixels)
 
         initial_z_np = initial_z.squeeze(0).cpu().numpy()
 
@@ -186,17 +176,18 @@ class ProbingEvaluator:
             ):
                 break
 
-            current_z = self._encode_state(
-                sample_t,
+            pixels_t = self._prepare_pixels(
+                sample_t[pixel_key],
                 pixel_key=pixel_key,
-                proprio_key="proprio",
             )
 
-            true_next_z = self._encode_state(
-                sample_tp1,
+            pixels_tp1 = self._prepare_pixels(
+                sample_tp1[pixel_key],
                 pixel_key=pixel_key,
-                proprio_key="proprio",
             )
+
+            current_z = self._encode_pixels(pixels_t)
+            true_next_z = self._encode_pixels(pixels_tp1)
 
             action = self._prepare_action(
                 sample_t[action_key],
@@ -309,11 +300,13 @@ class ProbingEvaluator:
         # 初期潜在 z_t
         # -------------------------------------------------
         sample0 = dataset[start_idx]
-        initial_z = self._encode_state(
-            sample0,
+
+        pixels0 = self._prepare_pixels(
+            sample0[pixel_key],
             pixel_key=pixel_key,
-            proprio_key="proprio",
         )
+
+        initial_z = self._encode_pixels(pixels0)  # (1, D)
 
         true_list.append(
             initial_z.squeeze(0).cpu().numpy()
@@ -352,11 +345,14 @@ class ProbingEvaluator:
             # -------------------------------------------------
             # 真の次状態 Encoder(o_{t+h+1})
             # -------------------------------------------------
-            true_next_z = self._encode_state(
-                sample_tp1,
+            pixels_tp1 = self._prepare_pixels(
+                sample_tp1[pixel_key],
                 pixel_key=pixel_key,
-                proprio_key="proprio",
             )
+
+            true_next_z = self._encode_pixels(
+                pixels_tp1
+            )  # (1, D)
 
             # -------------------------------------------------
             # 実際の行動 a_{t+h}
@@ -507,13 +503,12 @@ class ProbingEvaluator:
         ):
             sample = dataset[idx]
 
-            z = self._encode_state(
-                sample,
+            pixels = self._prepare_pixels(
+                sample[pixel_key],
                 pixel_key=pixel_key,
-                proprio_key="proprio",
             )
 
-            # z = self._encode_pixels(pixels)
+            z = self._encode_pixels(pixels)
 
             episode_true_list.append(
                 z.squeeze(0).cpu().numpy()
@@ -546,11 +541,12 @@ class ProbingEvaluator:
 
             sample0 = dataset[rollout_start_idx]
 
-            initial_z = self._encode_state(
-                sample0,
+            pixels0 = self._prepare_pixels(
+                sample0[pixel_key],
                 pixel_key=pixel_key,
-                proprio_key="proprio",
             )
+
+            initial_z = self._encode_pixels(pixels0)
 
             true_seq = [
                 initial_z.squeeze(0).cpu().numpy()
@@ -575,10 +571,13 @@ class ProbingEvaluator:
                 sample_t = dataset[idx_t]
                 sample_tp1 = dataset[idx_tp1]
 
-                true_next_z = self._encode_state(
-                    sample_tp1,
+                pixels_tp1 = self._prepare_pixels(
+                    sample_tp1[pixel_key],
                     pixel_key=pixel_key,
-                    proprio_key="proprio",
+                )
+
+                true_next_z = self._encode_pixels(
+                    pixels_tp1
                 )
 
                 action = self._prepare_action(
@@ -723,11 +722,12 @@ class ProbingEvaluator:
                     f"Available keys: {list(sample.keys())}"
                 )
 
-            z = self._encode_state(
-                sample,
+            pixels = self._prepare_pixels(
+                sample[pixel_key],
                 pixel_key=pixel_key,
-                proprio_key="proprio",
             )
+
+            z = self._encode_pixels(pixels)
 
             if z.ndim != 2 or z.shape[0] != 1:
                 raise RuntimeError(
@@ -901,44 +901,6 @@ class ProbingEvaluator:
         return torch.from_numpy(
             np.asarray(action_np, dtype=np.float32)
         ).to(self.device)
-        
-        
-    def _prepare_proprio(
-        self,
-        proprio,
-        proprio_key="proprio",
-    ):
-        if torch.is_tensor(proprio):
-            proprio_np = proprio.detach().cpu().numpy()
-        else:
-            proprio_np = np.asarray(proprio)
-
-        # historyが含まれる場合は最新時刻を使用
-        if proprio_np.ndim == 2:
-            proprio_np = proprio_np[-1]
-
-        if proprio_np.shape != (8,):
-            raise ValueError(
-                "Expected proprio shape (8,) or (T,8), "
-                f"got {proprio_np.shape}"
-            )
-
-        proprio_np = proprio_np[None, :]
-
-        if (
-            self.process is not None
-            and proprio_key in self.process
-        ):
-            proprio_np = self.process[
-                proprio_key
-            ].transform(proprio_np)
-
-        return torch.from_numpy(
-            np.asarray(
-                proprio_np,
-                dtype=np.float32,
-            )
-        ).to(self.device)
 
 
 
@@ -1061,47 +1023,6 @@ class ProbingEvaluator:
             z = self.model.projector(z)
 
         return z
-    
-    @torch.no_grad()
-    def _encode_state(
-        self,
-        sample,
-        pixel_key="pixels",
-        proprio_key="proprio",
-    ):
-        if pixel_key not in sample:
-            raise KeyError(
-                f"{pixel_key!r} was not found. "
-                f"Available keys: {list(sample.keys())}"
-            )
-
-        if proprio_key not in sample:
-            raise KeyError(
-                f"{proprio_key!r} was not found. "
-                f"Available keys: {list(sample.keys())}"
-            )
-
-        pixels = self._prepare_pixels(
-            sample[pixel_key],
-            pixel_key=pixel_key,
-        )
-        proprio = self._prepare_proprio(
-            sample[proprio_key],
-            proprio_key=proprio_key,
-        )
-
-        # JEPA.encode()の入力形式に合わせる
-        # pixels:   (B=1, T=1, C, H, W)
-        # proprio:  (B=1, T=1, 8)
-        info = {
-            "pixels": pixels.unsqueeze(1),
-            "proprio": proprio.unsqueeze(1),
-        }
-
-        output = self.model.encode(info)
-
-        # (1, 1, 224) -> (1, 224)
-        return output["emb"][:, -1]
 
 
     @torch.no_grad()
@@ -1200,32 +1121,6 @@ class ProbingEvaluator:
         )
 
         return feat_map
-
-
-    def _validate_dataset_sample(
-        self,
-        dataset,
-        dataset_name,
-    ):
-        sample = dataset[0]
-
-        required_keys = {
-            "pixels",
-            "proprio",
-            self.action_key,
-        }
-
-        missing_keys = (
-            required_keys
-            - set(sample.keys())
-        )
-
-        if missing_keys:
-            raise KeyError(
-                f"{dataset_name} dataset is missing keys: "
-                f"{sorted(missing_keys)}. "
-                f"Available keys: {list(sample.keys())}"
-            )
 
     @torch.no_grad()
     def make_dataset_sequence_pca_rgb_video(
