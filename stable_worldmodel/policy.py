@@ -385,6 +385,8 @@ class WorldModelPolicy(BasePolicy):
             env: The environment to associate with the policy.
         """
         self.env = env
+        # print("self.env:", self.env)
+        # print("self.cfg.action_space:", self.cfg.action_space)
         if self.cfg.action_space == "joint":
             self.action_space = self.env.action_space #実空間
             
@@ -413,10 +415,12 @@ class WorldModelPolicy(BasePolicy):
         
         
         n_envs = getattr(env, 'num_envs', 1)
-        # print("(stable_worldmodel/policy.py)self.action_space:", self.action_space)
+        
+        print("self.action_space:", self.action_space)
         self.solver.configure(
             n_envs=n_envs, config=self.cfg, action_processor=self.action_processor, action_space=self.action_space, 
         )
+
         self._action_buffer = deque(maxlen=self.flatten_receding_horizon)
 
         assert isinstance(self.solver, Solver), (
@@ -452,13 +456,12 @@ class WorldModelPolicy(BasePolicy):
             timestep = int(info_dict["step_idx"][0][0])
             save_dir = self.results_path / "cem"
             save_dir.mkdir(parents=True, exist_ok=True)
+            print("save_dir:", save_dir)
             
             plot_cem_cost_convergence(outputs, env_idx=0, save_dir=save_dir, timestep=timestep)
             plot_cem_sequence_transition_colormap(outputs, env_idx=0, save_dir=save_dir, timestep=timestep, action_processor=self.action_processor)
 
             actions = outputs['actions']  # (num_envs, horizon, action_dim)
-            print("actions.shape:", actions.shape)
-            print("type(actions):", type(actions))
             
             
             actions_np = actions.cpu().numpy() if torch.is_tensor(actions) else actions
@@ -484,9 +487,9 @@ class WorldModelPolicy(BasePolicy):
         action = action.reshape(*self.action_space.shape)
         action = action.numpy()
 
+
         # post-process action
         
-        # print("action in self.process: ", 'action' in self.process)
         if 'action' in self.process: ##
             action = self.process['action'].inverse_transform(action)
             # action_joint = action
