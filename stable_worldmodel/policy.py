@@ -437,7 +437,6 @@ class WorldModelPolicy(BasePolicy):
         assert hasattr(self, 'env'), 'Environment not set for the policy'
         assert 'pixels' in info_dict, "'pixels' must be provided in info_dict"
         assert 'goal' in info_dict, "'goal' must be provided in info_dict"
-        print("self.cfg.warm_start:", self.cfg.warm_start)
 
         info_dict = self._prepare_info(info_dict)
         # print("[stable-worldmodel/stable_worldmodel/policy.py] info_dict.keys() : ", info_dict.keys())
@@ -505,7 +504,7 @@ class WorldModelPolicy(BasePolicy):
         
             
         
-        print("self.action_space:", self.action_space)
+        # print("self.action_space:", self.action_space)
 
         return action, outputs  # (num_envs, action_dim)
 
