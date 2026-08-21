@@ -651,7 +651,7 @@ class ProbingEvaluator:
             return self.val_dataset
         return self.dataset
 
-
+    #画像latentを取得 (propioを捨てる)
     @torch.no_grad()
     def collect_frame_latents(
         self,
