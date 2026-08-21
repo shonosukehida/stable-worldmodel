@@ -39,7 +39,7 @@ import imageio.v2 as imageio
 import torch.nn.functional as F
 
 
-class ProbingEvaluator:
+class ProbingEvaluator_NoProprio:
     def __init__(
         self,
         dataset,
