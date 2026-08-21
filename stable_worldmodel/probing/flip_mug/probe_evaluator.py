@@ -723,11 +723,15 @@ class ProbingEvaluator:
                     f"Available keys: {list(sample.keys())}"
                 )
 
-            z = self._encode_state(
-                sample,
+            pixels = self._prepare_pixels(
+                sample[pixel_key],
                 pixel_key=pixel_key,
-                proprio_key="proprio",
             )
+
+            # Isotropy is evaluated only on the image representation.
+            # _encode_state() concatenates the proprioception embedding,
+            # which would add non-image dimensions to the covariance matrix.
+            z = self._encode_pixels(pixels)
 
             if z.ndim != 2 or z.shape[0] != 1:
                 raise RuntimeError(
