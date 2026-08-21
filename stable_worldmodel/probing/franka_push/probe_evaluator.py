@@ -2281,7 +2281,7 @@ class ProbingEvaluator:
 
                     closed_plot_result = plot_closed_loop_rollout_pca(
                         single_rollout_data,
-                        save_path=self.results_path / "probing" / "closed_loop_pca.png",
+                        save_path=self.results_path / "probing" / "train_closed_loop_pca.png",
                         title="Franka Push Closed-loop Dynamics",
                         draw_connections=False,
                     )
@@ -2364,21 +2364,19 @@ class ProbingEvaluator:
 
                     closed_true_z = closed_rollout_data["true_z"]
                     closed_pred_z = closed_rollout_data["pred_z"]
+                    
+                    closed_pred_z = closed_pred_z[: closed_true_z.shape[0]]
 
                     assert closed_true_z.shape == closed_pred_z.shape
-
-                    
-                    rollout_idx = 0 # 可視化するエピソード
-
                     single_rollout_data = {
-                        "true_z": closed_true_z[rollout_idx],
-                        "pred_z": closed_pred_z[rollout_idx],
-                        "actions": closed_rollout_data["actions"][rollout_idx],
+                        "true_z": closed_true_z,
+                        "pred_z": closed_pred_z,
+                        "actions": closed_rollout_data["actions"],
                     }
 
                     closed_plot_result = plot_closed_loop_rollout_pca(
                         single_rollout_data,
-                        save_path=self.results_path / "closed_loop_pca.png",
+                        save_path=self.results_path / "probing"  / "val_closed_loop_pca.png",
                         title="Franka Push Closed-loop Dynamics",
                         draw_connections=False,
                     )
