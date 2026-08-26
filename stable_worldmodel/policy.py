@@ -342,6 +342,7 @@ class WorldModelPolicy(BasePolicy):
         process: dict[str, Transformable] | None = None,
         transform: dict[str, Callable[[torch.Tensor], torch.Tensor]]
         | None = None,
+        action_projector=None,
         **kwargs: Any,
     ) -> None:
         """Initialize the world model policy.
@@ -358,6 +359,10 @@ class WorldModelPolicy(BasePolicy):
         self.type = 'world_model'
         self.cfg = config
         self.solver = solver
+        
+        self.action_projector = action_projector
+        
+        
         self.action_buffer: deque[torch.Tensor] = deque(
             maxlen=self.flatten_receding_horizon
         )
@@ -378,6 +383,11 @@ class WorldModelPolicy(BasePolicy):
         """Receding horizon in environment steps (with frameskip)."""
         return self.cfg.receding_horizon * self.cfg.action_block
 
+
+    def set_action_projector(self, action_projector) -> None:
+        self.action_projector = action_projector
+
+
     def set_env(self, env: Any) -> None:
         """Configure the policy and solver for the given environment.
 
@@ -385,8 +395,7 @@ class WorldModelPolicy(BasePolicy):
             env: The environment to associate with the policy.
         """
         self.env = env
-        # print("self.env:", self.env)
-        # print("self.cfg.action_space:", self.cfg.action_space)
+
         if self.cfg.action_space == "joint":
             self.action_space = self.env.action_space #実空間
             
@@ -416,7 +425,6 @@ class WorldModelPolicy(BasePolicy):
         
         n_envs = getattr(env, 'num_envs', 1)
         
-        print("self.action_space:", self.action_space)
         self.solver.configure(
             n_envs=n_envs, config=self.cfg, action_processor=self.action_processor, action_space=self.action_space, 
         )
@@ -442,6 +450,14 @@ class WorldModelPolicy(BasePolicy):
         assert 'pixels' in info_dict, "'pixels' must be provided in info_dict"
         assert 'goal' in info_dict, "'goal' must be provided in info_dict"
 
+
+        # ActionProjector用の物理状態。(qpos, ee, gripper)
+        # _prepare_info()には通さない。
+        projection_state = kwargs.get(
+            "projection_state",
+            None,
+        )
+
         info_dict = self._prepare_info(info_dict)
         # print("[stable-worldmodel/stable_worldmodel/policy.py] info_dict.keys() : ", info_dict.keys())
         # print("info_dict(step_idx)", info_dict["step_idx"][0][0])
@@ -449,7 +465,12 @@ class WorldModelPolicy(BasePolicy):
         outputs = None
         # need to replan if action buffer is empty
         if len(self._action_buffer) == 0:
-            outputs = self.solver(info_dict, init_action=self._next_init)
+            outputs = self.solver(
+                info_dict, 
+                init_action=self._next_init,
+                action_projector=self.action_projector,
+                projection_state=projection_state,
+            )
             
             
             #cem の内部状況をログ
@@ -497,17 +518,6 @@ class WorldModelPolicy(BasePolicy):
             action = self.process["action_cartesian"].inverse_transform(action)
         elif "action_joint" in self.process:
             action = self.process["action_joint"].inverse_transform(action)
-        
-        
-        # action = np.clip(
-        #     action,
-        #     self.action_space.low,
-        #     self.action_space.high,
-        # )
-        
-            
-        
-        # print("self.action_space:", self.action_space)
 
         return action, outputs  # (num_envs, action_dim)
 
