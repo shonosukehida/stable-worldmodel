@@ -53,6 +53,7 @@ class CEMSolver:
         """Configure the solver with environment specifications."""
 
         self._action_space = action_space
+        self._action_processor = action_processor
         
         self._n_envs = n_envs
         self._config = config
@@ -117,7 +118,7 @@ class CEMSolver:
 
     @torch.inference_mode()
     def solve(
-        self, info_dict: dict, init_action: torch.Tensor | None = None
+        self, info_dict: dict, init_action: torch.Tensor | None = None, action_projector=None, projection_state=None,
     ) -> dict:
         """Solve the planning problem using Cross Entropy Method."""
         start_time = time.time()
@@ -126,6 +127,16 @@ class CEMSolver:
             "mean": [],  # History of means
             "var": [],  # History of vars
         }
+
+
+        if (
+            action_projector is not None
+            and projection_state is None
+        ):
+            raise ValueError(
+                "projection_state is required "
+                "when action_projector is enabled"
+            )
         
 
 
@@ -208,11 +219,36 @@ class CEMSolver:
                 
 
                 current_info = expanded_infos.copy()
-                # print("current_info.keys(): ", current_info.keys())
+
+
+                # ----------------------------------
+                # Action projection
+                # ----------------------------------
+                if action_projector is not None:
+
+                    (
+                        candidates_for_model,
+                        feasible_mask,
+                    ) = self._project_candidates(
+                        candidates=candidates,
+                        action_projector=action_projector,
+                        projection_state=projection_state,
+                        start_idx=start_idx,
+                        current_bs=current_bs,
+                    )
+
+                else:
+                    candidates_for_model = candidates
+                    feasible_mask = None
+                
+                
 
                 # Evaluate candidates
-                costs = self.model.get_cost(current_info, candidates)
-                # print("costs sample:", costs[0, :10])
+                costs = self.model.get_cost(current_info, candidates_for_model)
+
+                if feasible_mask is not None:
+                    costs = costs.masked_fill(~feasible_mask, float("inf"),)
+
 
                 assert isinstance(costs, torch.Tensor), f"Expected cost to be a torch.Tensor, got {type(costs)}"
                 assert costs.ndim == 2 and costs.shape[0] == current_bs and costs.shape[1] == self.num_samples, (
@@ -283,3 +319,235 @@ class CEMSolver:
 
 
 
+    def _project_candidates(
+        self,
+        candidates,
+        action_projector,
+        projection_state,
+        start_idx,
+        current_bs,
+    ):
+        """
+        CEM candidateを物理空間へ戻し、
+        ActionProjectorをhorizon方向に逐次適用した後、
+        再び正規化空間へ戻す。
+
+        Args:
+            candidates:
+                shape:
+                (batch, num_samples, horizon, action_dim)
+
+                normalized action space
+
+        Returns:
+            projected_candidates:
+                candidatesと同shape
+                projected後のnormalized action
+
+            feasible_mask:
+                shape (batch, num_samples)
+        """
+
+        if self._config.action_block != 1:
+            raise NotImplementedError(
+                "Action projection currently assumes "
+                "action_block == 1"
+            )
+
+        # -----------------------------
+        # normalized -> physical
+        # -----------------------------
+        candidates_np = (
+            candidates
+            .detach()
+            .cpu()
+            .numpy()
+        )
+
+        original_shape = candidates_np.shape
+
+        flat_candidates = candidates_np.reshape(
+            -1,
+            original_shape[-1],
+        )
+
+        physical_flat = (
+            self._action_processor
+            .inverse_transform(flat_candidates)
+        )
+
+        physical_candidates = physical_flat.reshape(
+            original_shape
+        ).astype(np.float32)
+
+        # -----------------------------
+        # output buffers
+        # -----------------------------
+        projected_physical = np.empty_like(
+            physical_candidates,
+            dtype=np.float32,
+        )
+
+        feasible_mask = np.ones(
+            (current_bs, self.num_samples),
+            dtype=bool,
+        )
+
+        # -----------------------------
+        # initial physical state
+        # -----------------------------
+        qpos_all = np.asarray(
+            projection_state["qpos"],
+            dtype=np.float32,
+        )
+
+        ee_all = np.asarray(
+            projection_state["ee"],
+            dtype=np.float32,
+        )
+
+        gripper_all = np.asarray(
+            projection_state["gripper"],
+            dtype=np.float32,
+        )
+
+        # n_envs=1のとき shape を揃える
+        if qpos_all.ndim == 1:
+            qpos_all = qpos_all[None, :]
+
+        if ee_all.ndim == 1:
+            ee_all = ee_all[None, :]
+
+        if gripper_all.ndim == 0:
+            gripper_all = gripper_all[None]
+
+        # -----------------------------
+        # each environment
+        # -----------------------------
+        for batch_idx in range(current_bs):
+
+            env_idx = start_idx + batch_idx
+
+            initial_qpos = qpos_all[env_idx]
+            initial_ee = ee_all[env_idx]
+            initial_gripper = float(
+                gripper_all[env_idx]
+            )
+
+            # -------------------------
+            # each CEM particle
+            # -------------------------
+            for sample_idx in range(
+                self.num_samples
+            ):
+
+                simulated_qpos = (
+                    initial_qpos.copy()
+                )
+
+                simulated_ee = (
+                    initial_ee.copy()
+                )
+
+                simulated_gripper = (
+                    initial_gripper
+                )
+
+                # ---------------------
+                # rollout over horizon
+                # ---------------------
+                for horizon_idx in range(
+                    self.horizon
+                ):
+
+                    raw_action = physical_candidates[
+                        batch_idx,
+                        sample_idx,
+                        horizon_idx,
+                    ]
+
+                    result = action_projector.project(
+                        action=raw_action,
+                        current_qpos=simulated_qpos,
+                        current_ee=simulated_ee,
+                        current_gripper=simulated_gripper,
+                    )
+
+                    if not result.feasible:
+                        feasible_mask[
+                            batch_idx,
+                            sample_idx,
+                        ] = False
+
+                        # このparticleはどうせ無効なので
+                        # 残りの計算を止める
+                        break
+
+                    projected_physical[
+                        batch_idx,
+                        sample_idx,
+                        horizon_idx,
+                    ] = result.action
+
+                    # 次stepの仮想状態
+                    simulated_qpos = (
+                        result.qpos.copy()
+                    )
+
+                    simulated_ee = (
+                        result.ee.copy()
+                    )
+
+                    simulated_gripper = float(
+                        result.action[7]
+                    )
+
+                # IK failureなどが起きた場合、
+                # 未初期化領域を残さない
+                if not feasible_mask[
+                    batch_idx,
+                    sample_idx,
+                ]:
+                    projected_physical[
+                        batch_idx,
+                        sample_idx,
+                    ] = physical_candidates[
+                        batch_idx,
+                        sample_idx,
+                    ]
+
+        # -----------------------------
+        # physical -> normalized
+        # -----------------------------
+        projected_flat = projected_physical.reshape(
+            -1,
+            original_shape[-1],
+        )
+
+        normalized_flat = (
+            self._action_processor
+            .transform(projected_flat)
+        )
+
+        projected_normalized = (
+            normalized_flat
+            .reshape(original_shape)
+            .astype(np.float32)
+        )
+
+        projected_candidates = torch.as_tensor(
+            projected_normalized,
+            dtype=candidates.dtype,
+            device=candidates.device,
+        )
+
+        feasible_mask = torch.as_tensor(
+            feasible_mask,
+            dtype=torch.bool,
+            device=candidates.device,
+        )
+
+        return (
+            projected_candidates,
+            feasible_mask,
+        )
