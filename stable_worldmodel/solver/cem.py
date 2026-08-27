@@ -265,7 +265,12 @@ class CEMSolver:
 
                 # Indexing: candidates[batch_idx, sample_idx]
                 # Result shape: (Batch, K, Horizon, Dim)
-                topk_candidates = candidates[batch_indices, topk_inds]
+                # topk_candidates = candidates[batch_indices, topk_inds]
+                if action_projector is not None:
+                    topk_candidates = candidates_for_model[batch_indices, topk_inds]
+
+                else:
+                    topk_candidates = candidates[batch_indices, topk_inds]
 
                 # Update Mean and Variance based on Top-K
                 batch_mean = topk_candidates.mean(dim=1)
