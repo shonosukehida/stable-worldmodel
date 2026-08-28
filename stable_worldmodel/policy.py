@@ -161,13 +161,15 @@ class BasePolicy:
 
             # collapse env and time dimensions for transform (e, t, ...) -> (e * t, ...)
             # then restore after transform
+            image_keys = {"pixels", "wrist_pixels", "goal", "goal_wrist_pixels",}
+            
             if hasattr(self, 'transform') and k in self.transform:
                 shape = None
                 if is_numpy or torch.is_tensor(v):
                     if v.ndim > 2:
                         shape = v.shape
                         v = v.reshape(-1, *shape[2:])
-                if k.startswith('pixels') or k.startswith('goal'):
+                if k in image_keys:
                     # permute channel first for transform
                     if is_numpy:
                         v = np.transpose(v, (0, 3, 1, 2))
