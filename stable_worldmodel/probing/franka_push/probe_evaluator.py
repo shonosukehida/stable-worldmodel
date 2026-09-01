@@ -1723,106 +1723,6 @@ class ProbingEvaluator:
 
 
 
-    @torch.no_grad()
-    def collect_cross_position_latents(
-        self,
-        center=None,
-        radius=0.05,
-        num_per_axis=11,
-        bluebox_pos=None,
-        z_value=0.05,
-        image_size=(64, 64),
-        pixel_key="pixels",
-    ):
-        """
-        EE を十字状(+x, -x, +y, -y)に配置し、
-        各状態画像を render して encoder latent を collect する。
-
-        Returns:
-            {
-                "latents": (N, D),
-                "ee_pos": (N, 3),
-                "bluebox_pos": (3,),
-                "labels": (N,),
-                "images": list[H,W,C],
-            }
-        """
-        if self.env is None:
-            raise ValueError("self.env is None. Please pass env to ProbingEvaluator.")
-
-        if center is None:
-            center = np.array(
-                [
-                    (self.x_range[0] + self.x_range[1]) / 2.0,
-                    (self.y_range[0] + self.y_range[1]) / 2.0,
-                    z_value,
-                ],
-                dtype=np.float32,
-            )
-        else:
-            center = np.asarray(center, dtype=np.float32)
-
-        if bluebox_pos is None:
-            bluebox_pos = np.array([center[0], center[1], self.z_range[0]], dtype=np.float32)
-        else:
-            bluebox_pos = np.asarray(bluebox_pos, dtype=np.float32)
-
-        offsets = np.linspace(-radius, radius, num_per_axis, dtype=np.float32)
-
-        ee_positions = []
-        labels = []
-
-        # x軸方向
-        for dx in offsets:
-            pos = center.copy()
-            pos[0] = np.clip(center[0] + dx, self.x_range[0], self.x_range[1])
-            pos[1] = center[1]
-            pos[2] = z_value
-            ee_positions.append(pos)
-            labels.append("x_axis")
-
-        # y軸方向
-        for dy in offsets:
-            # center は x_axis 側ですでに入っているので重複を避ける
-            if abs(float(dy)) < 1e-8:
-                continue
-
-            pos = center.copy()
-            pos[0] = center[0]
-            pos[1] = np.clip(center[1] + dy, self.y_range[0], self.y_range[1])
-            pos[2] = z_value
-            ee_positions.append(pos)
-            labels.append("y_axis")
-
-        latents = []
-        images = []
-
-        for ee_pos in tqdm(ee_positions, desc="Collecting cross position latents"):
-            img = self.render_state_image(
-                ee_pos=ee_pos,
-                bluebox_pos=bluebox_pos,
-                image_size=image_size,
-                reset=True,
-            )
-
-            z = self.encode_rendered_image(
-                img,
-                pixel_key=pixel_key,
-            )
-
-            latents.append(z.squeeze(0).cpu().numpy())
-            images.append(img)
-
-        return {
-            "latents": np.stack(latents, axis=0),
-            "ee_pos": np.stack(ee_positions, axis=0),
-            "bluebox_pos": bluebox_pos,
-            "center": center,
-            "labels": np.asarray(labels),
-            "images": images,
-        }
-
-
     def _scalar_value(self, value):
         if torch.is_tensor(value):
             value = value.detach().cpu().numpy()
@@ -2569,30 +2469,6 @@ class ProbingEvaluator:
             print(out)
 
 
-        if self.config.plot_cross_position_latent_pca.check:
-            cross_data = self.collect_cross_position_latents(
-                radius=0.08,
-                num_per_axis=100,
-                bluebox_pos=[0.55, 0.0, 0.02],
-                z_value=self.z_range[0],
-            )
 
-            color_map = {
-                "x_axis": "C0",
-                "y_axis": "C1",
-            }
-
-            plot_cross_position_latent_pca_2d(
-                cross_data,
-                save_path=self.results_path / "probing" / "cross_position_latent_pca_2d.png",
-                title="Cross EE position encoder latent PCA 2D",
-            )
-
-            plot_cross_position_xy_trajectory(
-                cross_data,
-                save_path=self.results_path / "probing" / "cross_position_xy_trajectory.png",
-                title="Cross EE position trajectory",
-                color_map=color_map,
-            )
             
             
