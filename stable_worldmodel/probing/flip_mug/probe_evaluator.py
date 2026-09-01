@@ -510,6 +510,7 @@ class ProbingEvaluator:
             z = self._encode_state(
                 sample,
                 pixel_key=pixel_key,
+                wrist_pixel_key="wrist_pixels",
                 proprio_key="proprio",
             )
 
@@ -731,7 +732,7 @@ class ProbingEvaluator:
             # Isotropy is evaluated only on the image representation.
             # _encode_state() concatenates the proprioception embedding,
             # which would add non-image dimensions to the covariance matrix.
-            z = self._encode_pixels(pixels)
+            z = self._encode_pixels(pixels, pixel_key)
 
             if z.ndim != 2 or z.shape[0] != 1:
                 raise RuntimeError(
@@ -1049,20 +1050,38 @@ class ProbingEvaluator:
         value = np.asarray(value)
         return int(value.reshape(-1)[-1])
 
-    def _encode_pixels(self, pixels):
+    def _encode_pixels(self, pixels, pixel_key="pixels",):
         """
         pixels: (B, C, H, W)
         return: (B, D)
         """
-        z = self.model.encoder(pixels, interpolate_pos_encoding=True,)
+        
+        if pixel_key == "pixels":
+            encoder = self.model.overhead_encoder
+            projector = self.model.overhead_projector
 
-        # HuggingFace ViTModel の場合
-        if hasattr(z, "last_hidden_state"):
-            z = z.last_hidden_state[:, 0]
+        elif pixel_key == "wrist_pixels":
+            encoder = self.model.wrist_encoder
+            projector = self.model.wrist_projector
 
-        # LeWM は projector を通した embedding を使うのが自然
-        if hasattr(self.model, "projector"):
-            z = self.model.projector(z)
+        else:
+            raise ValueError(
+                f"Unsupported pixel_key: {pixel_key}"
+            )
+
+
+
+        output = encoder(
+            pixels,
+            interpolate_pos_encoding=True,
+        )
+
+        if hasattr(output, "last_hidden_state"):
+            z = output.last_hidden_state[:, 0]
+        else:
+            z = output[:, 0]
+
+        z = projector(z)
 
         return z
     
@@ -1071,11 +1090,18 @@ class ProbingEvaluator:
         self,
         sample,
         pixel_key="pixels",
+        wrist_pixel_key="wrist_pixels",
         proprio_key="proprio",
     ):
         if pixel_key not in sample:
             raise KeyError(
                 f"{pixel_key!r} was not found. "
+                f"Available keys: {list(sample.keys())}"
+            )
+            
+        if wrist_pixel_key not in sample:
+            raise KeyError(
+                f"{wrist_pixel_key!r} was not found. "
                 f"Available keys: {list(sample.keys())}"
             )
 
@@ -1089,6 +1115,12 @@ class ProbingEvaluator:
             sample[pixel_key],
             pixel_key=pixel_key,
         )
+
+        wrist_pixels = self._prepare_pixels(
+            sample[wrist_pixel_key],
+            pixel_key=wrist_pixel_key,
+        )
+        
         proprio = self._prepare_proprio(
             sample[proprio_key],
             proprio_key=proprio_key,
@@ -1099,6 +1131,7 @@ class ProbingEvaluator:
         # proprio:  (B=1, T=1, 8)
         info = {
             "pixels": pixels.unsqueeze(1),
+            "wrist_pixels": wrist_pixels.unsqueeze(1),
             "proprio": proprio.unsqueeze(1),
         }
 
@@ -1139,8 +1172,16 @@ class ProbingEvaluator:
                 (B, C_feat, h_patch, w_patch)
         """
         
-        # print("pixels.shape:", pixels.shape)
-        out = self.model.encoder(
+        if pixel_key == "pixels":
+            encoder = self.model.overhead_encoder
+        elif pixel_key == "wrist_pixels":
+            encoder = self.model.wrist_encoder
+        else:
+            raise ValueError(
+                f"Unsupported pixel_key: {pixel_key}"
+            )
+            
+        out = encoder(
             pixels,
             interpolate_pos_encoding=True,
             output_hidden_states=True,
@@ -1177,7 +1218,7 @@ class ProbingEvaluator:
         B, N, D = patch_tokens.shape
         _, _, H, W = pixels.shape
 
-        patch_size = self.model.encoder.config.patch_size
+        patch_size = encoder.config.patch_size
 
         if isinstance(patch_size, int):
             patch_h = H // patch_size
@@ -1215,6 +1256,7 @@ class ProbingEvaluator:
 
         required_keys = {
             "pixels",
+            "wrist_pixels",
             "proprio",
             self.action_key,
         }
@@ -1657,7 +1699,8 @@ class ProbingEvaluator:
         
         if self.config.plot_all_train_data:
             if self.config.plot_open_data:
-
+                
+                print("open pred in train data")
                 rollout_data = self.collect_one_step_rollout_latents(
                     start_idx=0,
                     max_horizon=self.plot_max_horizon,
@@ -1714,6 +1757,7 @@ class ProbingEvaluator:
             
             if self.config.plot_closed_data.plot_whisker.plot:
 
+                print("whisker closed pred in train data")
                 episode_closed_data = self.collect_episode_closed_rollouts(
                     start_idx=0,
                     pred_step=self.config.plot_closed_data.plot_whisker.pred_step,
@@ -1737,7 +1781,7 @@ class ProbingEvaluator:
                 )
             
             if self.config.plot_closed_data.plot_pred_horizon.plot:
-
+                print("long horizon closed pred in train data")                  
                 closed_rollout_data = self.collect_closed_loop_rollout_latents(
                     start_idx=0,
                     pred_step=self.config.plot_closed_data.plot_pred_horizon.pred_horizon,
@@ -1801,6 +1845,7 @@ class ProbingEvaluator:
                     exist_ok=True,
                 )
 
+                print("open pred in val data")
                 rollout_data = self.collect_one_step_rollout_latents(
                     start_idx=0,
                     max_horizon=self.plot_max_horizon,
@@ -1857,6 +1902,7 @@ class ProbingEvaluator:
             
             if self.config.plot_closed_data.plot_whisker.plot:
                 
+                print("whisker closed pred in val data")
                 episode_closed_data = self.collect_episode_closed_rollouts(
                     start_idx=0,
                     pred_step=self.config.plot_closed_data.plot_whisker.pred_step,
@@ -1881,6 +1927,7 @@ class ProbingEvaluator:
             
             if self.config.plot_closed_data.plot_pred_horizon.plot:
 
+                print("long horizon closed pred in val data")  
                 closed_rollout_data = self.collect_closed_loop_rollout_latents(
                     start_idx=0,
                     pred_step=self.config.plot_closed_data.plot_pred_horizon.pred_horizon,
@@ -1931,81 +1978,46 @@ class ProbingEvaluator:
                 )
                 
 
-            if self.config.plot_closed_data.plot_pred_horizon.plot:
-                closed_rollout_data = self.collect_closed_loop_rollout_latents(
-                    start_idx=0,
-                    pred_step=self.config.plot_closed_data.plot_pred_horizon.pred_horizon,
-                    pixel_key="pixels",
-                    action_key=self.action_key,
-                    is_val=True,
-                )
-
-                closed_true_z = closed_rollout_data["true_z"]
-                closed_pred_z = closed_rollout_data["pred_z"]
-
-                assert closed_true_z.shape == closed_pred_z.shape
-
-                # horizonごとの潜在予測MSE
-                closed_mse_by_horizon = np.mean(
-                    (closed_pred_z - closed_true_z) ** 2,
-                    axis=1,
-                )
-
-                print("closed-loop MSE by horizon:")
-                for h, mse in enumerate(closed_mse_by_horizon):
-                    print(f"h={h:3d}: {mse:.8f}")
-
-                print(
-                    "closed-loop final MSE:",
-                    closed_mse_by_horizon[-1],
-                )
-
-                closed_plot_result = plot_closed_loop_rollout_pca(
-                    closed_rollout_data,
-                    save_path=save_dir / "val_closed_loop_pca.png",
-                    title="Flip Mug Closed-loop Dynamics",
-                    draw_connections=False,
-                )
-
-                np.savez_compressed(
-                    save_dir / "val_closed_loop_rollout_data.npz",
-                    true_z=closed_true_z,
-                    pred_z=closed_pred_z,
-                    actions=closed_rollout_data["actions"],
-                    indices=closed_rollout_data["indices"],
-                    mse_by_horizon=closed_mse_by_horizon,
-                    true_pca=closed_plot_result["true_pca"],
-                    pred_pca=closed_plot_result["pred_pca"],
-                    explained_variance_ratio=(
-                        closed_plot_result["explained_variance_ratio"]
-                    ),
-                )
         if self.config.encoder_rgb_pca.check:
-            print("encoder_rgb_pca")
-            pca_video_result = self.make_dataset_sequence_pca_rgb_video(
+            print("overhead_encoder_rgb_pca")
+            pca_overhead_video_result = self.make_dataset_sequence_pca_rgb_video(
                 start_idx=0,
                 horizon=self.config.encoder_rgb_pca.horizon,
                 pixel_key="pixels",
                 is_val=self.config.encoder_rgb_pca.is_val,
                 save_path=(
                     self.results_path
-                    / "probing" / "flip_mug_encoder_pca_rgb.mp4"
+                    / "probing" / "flip_mug_overhead_encoder_pca_rgb.mp4"
                 ),
                 layer_idx=None,
                 upsample=(224, 298),
                 fps=10,
             )
 
-            print(
-                "PCA-RGB video result:",
-                pca_video_result,
+            print("wrist_encoder_rgb_pca")
+            pca_wrist_video_result = self.make_dataset_sequence_pca_rgb_video(
+                start_idx=0,
+                horizon=self.config.encoder_rgb_pca.horizon,
+                pixel_key="wrist_pixels",
+                is_val=self.config.encoder_rgb_pca.is_val,
+                save_path=(
+                    self.results_path
+                    / "probing" / "flip_mug_wrist_encoder_pca_rgb.mp4"
+                ),
+                layer_idx=None,
+                upsample=(224, 298),
+                fps=10,
             )
+
+
+
         if self.config.encoder_isotropy.check:
+            print("overhead encoder isotropy")
             train_isotropy = self.evaluate_encoder_isotropy(
                 max_samples=self.config.encoder_isotropy.max_samples,
                 pixel_key="pixels",
                 is_val=False,
-                save_name="train_encoder_latent",
+                save_name="train_overhead_encoder_latent",
                 sample_interval=(
                     self.config.encoder_isotropy.sample_interval
                 ),
@@ -2016,6 +2028,7 @@ class ProbingEvaluator:
                 / "probing"
                 / "isotropy"
                 / "train"
+                / "overhead"
             )
             isotropy_dir.mkdir(
                 parents=True,
@@ -2023,7 +2036,41 @@ class ProbingEvaluator:
             )
 
             np.savez_compressed(
-                isotropy_dir / "train_encoder_latents.npz",
+                isotropy_dir / "train_overhead_encoder_latents.npz",
+                latents=train_isotropy["latents"],
+                indices=train_isotropy["indices"],
+            )
+
+
+
+
+
+
+            print("wrist encoder isotropy")
+            train_isotropy = self.evaluate_encoder_isotropy(
+                max_samples=self.config.encoder_isotropy.max_samples,
+                pixel_key="wrist_pixels",
+                is_val=False,
+                save_name="train_wrist_encoder_latent",
+                sample_interval=(
+                    self.config.encoder_isotropy.sample_interval
+                ),
+            )
+
+            isotropy_dir = (
+                Path(self.results_path)
+                / "probing"
+                / "isotropy"
+                / "train"
+                / "wrist"
+            )
+            isotropy_dir.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
+            np.savez_compressed(
+                isotropy_dir / "train_wrist_encoder_latents.npz",
                 latents=train_isotropy["latents"],
                 indices=train_isotropy["indices"],
             )
