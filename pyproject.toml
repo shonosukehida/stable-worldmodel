@@ -26,6 +26,7 @@ dependencies = [
   "tqdm",
   "typer",
   "rich",
+  "diffusers>=0.40.0",
 ]
 
 [project.scripts]
