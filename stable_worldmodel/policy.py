@@ -332,6 +332,64 @@ class FeedForwardPolicy(BasePolicy):
         return action
 
 
+class DiffusionPolicy(BasePolicy):
+    def __init__(
+        self,
+        model,
+        noise_scheduler,
+        pred_horizon: int,
+        obs_horizon: int,
+        action_horizon: int,
+        action_dim: int,
+        process=None,
+        transform=None,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+
+        self.type = "diffusion"
+
+        self.model = model
+        self.noise_scheduler = noise_scheduler
+
+        self.pred_horizon = pred_horizon
+        self.obs_horizon = obs_horizon
+        self.action_horizon = action_horizon
+        self.action_dim = action_dim
+
+        self.process = process or {}
+        self.transform = transform or {}
+
+    def get_action(
+        self,
+        info_dict: dict,
+        **kwargs,
+    ):
+        """Generate actions for standalone Diffusion Policy inference."""
+        raise NotImplementedError
+
+    def sample_action_sequences(
+        self,
+        info_dict: dict,
+        num_samples: int = 1,
+    ):
+        """Sample multiple candidate action sequences.
+
+        Returns:
+            Tensor with shape:
+                (B, num_samples, T, action_dim)
+        """
+        raise NotImplementedError
+
+    def compute_loss(
+        self,
+        batch: dict,
+    ):
+        """Compute the Diffusion Policy training loss."""
+        raise NotImplementedError
+
+
+
 class WorldModelPolicy(BasePolicy):
     """Policy using a world model and planning solver for action selection."""
 
