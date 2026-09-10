@@ -17,6 +17,7 @@ import gymnasium as gym
 
 
 from stable_worldmodel.plot.plot import plot_cem_cost_convergence, plot_cem_sequence_transition_colormap
+from stable_worldmodel.reward import latent_goal_reward
 
 
 @dataclass(frozen=True)
@@ -807,6 +808,369 @@ class DiffusionPolicy(BasePolicy):
         return loss
 
 
+
+class GPCPolicy(BasePolicy):
+    """
+    GPC-RANK policy.
+
+    1. DiffusionPolicy generates K candidate action sequences.
+    2. World Model rolls out each candidate.
+    3. reward_fn evaluates the predicted trajectories.
+    4. The highest-reward candidate is selected.
+
+    GPC-OPT is not implemented here.
+    """
+
+    def __init__(
+        self,
+        diffusion_policy: DiffusionPolicy,
+        world_model,
+        reward_fn,
+        num_candidates: int = 50,
+        action_horizon: int | None = None,
+        action_converter=None,
+        process = None,
+        transform = None,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+
+        self.type = "gpc"
+
+        self.diffusion_policy = diffusion_policy
+        self.world_model = world_model
+
+        # reward_fn(
+        #     rollout_output,
+        #     info_dict,
+        # ) -> Tensor of shape (B, K)
+        self.reward_fn = reward_fn
+
+        self.num_candidates = num_candidates
+
+        if action_horizon is None:
+            action_horizon = diffusion_policy.action_horizon
+
+        self.action_horizon = action_horizon
+
+        # Optional:
+        # convert DP-normalized actions into the action representation
+        # expected by the World Model.
+        self.action_converter = action_converter
+        
+        
+        #LeWM用統計
+        self.process = process or {}
+        self.transform = transform or {}
+
+    @property
+    def device(self):
+        return self.diffusion_policy.device
+
+
+    def rollout(
+        self,
+        info_dict: dict,
+        action_sequences: torch.Tensor,
+    ):
+        """
+        Roll out K candidate action sequences with LeWM.
+
+        Args:
+            info_dict:
+                Current observation information.
+
+            action_sequences:
+                Candidate actions for LeWM.
+                Shape: (B, K, T, action_dim)
+
+        Returns:
+            rollout_output:
+                Dictionary containing predicted embeddings.
+                rollout_output["predicted_emb"]:
+                    (B, K, T_pred, latent_dim)
+        """
+
+        wm_info = dict(info_dict)
+        wm_info = self._prepare_info(wm_info)
+
+        B, K, T, D = action_sequences.shape
+
+        # --------------------------------------------------
+        # Prepare observation for K candidate rollouts
+        # --------------------------------------------------
+
+        for key, value in list(wm_info.items()):
+            if not torch.is_tensor(value): continue
+
+            # Current LeWM rollout expects a candidate dimension S.
+            #
+            # e.g.
+            # pixels:
+            #   (B, T_obs, C, H, W)
+            # ->
+            #   (B, K, T_obs, C, H, W)
+
+            if value.shape[0] != B: continue
+
+            wm_info[key] = (value[:, None].expand(B, K, *value.shape[1:],))
+
+        # --------------------------------------------------
+        # Move inputs to World Model device
+        # --------------------------------------------------
+
+        device = next(self.world_model.parameters()).device
+
+        for key, value in wm_info.items():
+            if torch.is_tensor(value):
+                wm_info[key] = value.to(device)
+
+        action_sequences = action_sequences.to(device)
+
+        # --------------------------------------------------
+        # Encode goal
+        # --------------------------------------------------
+
+        goal_emb = self.encode_goal(info_dict)
+
+
+        # --------------------------------------------------
+        # LeWM rollout
+        # --------------------------------------------------
+
+        rollout_output = self.world_model.rollout(wm_info, action_sequences,)
+        
+        rollout_output["goal_emb"] = goal_emb
+
+        return rollout_output
+
+
+
+
+
+
+    @torch.no_grad()
+    def get_action(
+        self,
+        info_dict: dict,
+        **kwargs,
+    ) -> np.ndarray:
+        """
+        Select an action with GPC-RANK.
+
+        Expected use case:
+            batch size B = 1 for real-robot inference.
+        """
+
+        # --------------------------------------------------
+        # 1. Generate Diffusion Policy proposals
+        # --------------------------------------------------
+
+        action_sequences = (
+            self.diffusion_policy.sample_action_sequences(
+                info_dict,
+                num_samples=self.num_candidates,
+            )
+        )
+
+        # Expected:
+        # (B, K, pred_horizon, action_dim)
+
+        if action_sequences.ndim != 4:
+            raise ValueError(
+                "Expected candidate actions with shape "
+                "(B, K, T, D), "
+                f"but got {action_sequences.shape}"
+            )
+
+        B, K, T, D = action_sequences.shape
+
+        if K != self.num_candidates:
+            raise ValueError(f"Expected K={self.num_candidates}, got K={K}")
+
+        # --------------------------------------------------
+        # 2. Extract actions corresponding to the future
+        # --------------------------------------------------
+
+        # Same convention as standalone DiffusionPolicy.
+        start = self.diffusion_policy.obs_horizon - 1
+
+        end = min(
+            start + self.action_horizon,
+            T,
+        )
+
+        if end <= start:
+            raise ValueError(
+                f"Invalid action range: start={start}, end={end}"
+            )
+
+        candidate_actions = action_sequences[
+            :, :, start:end
+        ]
+
+        # (B, K, action_horizon, action_dim)
+
+        # --------------------------------------------------
+        # 3. Convert action representation for World Model
+        # --------------------------------------------------
+
+        wm_actions = candidate_actions
+
+        if self.action_converter is not None:
+            wm_actions = self.action_converter(
+                candidate_actions
+            )
+
+        # --------------------------------------------------
+        # 4. World Model rollout
+        # --------------------------------------------------
+
+        rollout_output = self.rollout(
+            info_dict=info_dict,
+            action_sequences=wm_actions,
+        )
+
+        # --------------------------------------------------
+        # 5. Evaluate candidate trajectories
+        # --------------------------------------------------
+
+        rewards = self.reward_fn(
+            rollout_output,
+            info_dict,
+        )
+
+        if not torch.is_tensor(rewards):
+            raise TypeError(
+                "reward_fn must return a torch.Tensor"
+            )
+
+        # Expected:
+        # rewards: (B, K)
+
+        if rewards.shape != (B, K):
+            raise ValueError(
+                "reward_fn must return shape "
+                f"(B, K)=({B}, {K}), "
+                f"but got {rewards.shape}"
+            )
+
+        # --------------------------------------------------
+        # 6. Pick highest-reward candidate
+        # --------------------------------------------------
+
+        best_idx = torch.argmax(
+            rewards,
+            dim=1,
+        )
+
+        batch_idx = torch.arange(
+            B,
+            device=best_idx.device,
+        )
+
+        best_sequence = candidate_actions[
+            batch_idx,
+            best_idx,
+        ]
+
+        # (B, action_horizon, action_dim)
+
+        # Initially execute only the first action.
+        action = best_sequence[:, 0]
+
+        # --------------------------------------------------
+        # 7. Denormalize DP action for environment
+        # --------------------------------------------------
+
+        action = action.detach().cpu().numpy()
+
+        if "action_cartesian" in self.diffusion_policy.process:
+            action = self.diffusion_policy.process[
+                "action_cartesian"
+            ].inverse_transform(action)
+
+        elif "action" in self.diffusion_policy.process:
+            action = self.diffusion_policy.process[
+                "action"
+            ].inverse_transform(action)
+
+        elif "action_joint" in self.diffusion_policy.process:
+            action = self.diffusion_policy.process[
+                "action_joint"
+            ].inverse_transform(action)
+
+        return action
+
+    def encode_goal(
+        self,
+        info_dict: dict,
+    ) -> torch.Tensor:
+        """
+        Encode goal observation with LeWM.
+
+        Args:
+            info_dict:
+                Observation dictionary containing
+                "goal" and corresponding goal_* entries.
+
+        Returns:
+            goal_emb:
+                Encoded goal latent.
+                Shape: (B, T_goal, latent_dim)
+        """
+
+        if "goal" not in info_dict:
+            raise KeyError(
+                "'goal' must be provided in info_dict"
+            )
+
+        info = dict(info_dict)
+
+        # --------------------------------------------------
+        # Build goal observation
+        # --------------------------------------------------
+
+
+        goal_info = {k: v for k, v in info.items() if k == "goal" or k.startswith("goal_")}
+
+        # goal image -> pixels
+        goal_info["pixels"] = goal_info["goal"]
+
+        # goal_proprio -> proprio
+        # goal_xxx     -> xxx
+        for key in list(goal_info.keys()):
+            if key.startswith("goal_"):
+                new_key = key[len("goal_"):]
+                goal_info[new_key] = goal_info.pop(key)
+
+        goal_info.pop("goal", None)
+
+        # Goal encoding does not require actions
+        for key in ["action", "action_joint", "action_cartesian",]:
+            goal_info.pop(key, None)
+
+        # --------------------------------------------------
+        # LeWM preprocessing
+        # --------------------------------------------------
+        goal_info = self._prepare_info(goal_info)
+
+        # --------------------------------------------------
+        # Move to World Model device
+        # --------------------------------------------------
+
+        device = next(self.world_model.parameters()).device
+
+        for key, value in goal_info.items():
+            if torch.is_tensor(value):
+                goal_info[key] = value.to(device)
+
+        # --------------------------------------------------
+        # Encode goal
+        # --------------------------------------------------
+        goal_output = self.world_model.encode(goal_info)
+
+        return goal_output["emb"]
 
 
 
