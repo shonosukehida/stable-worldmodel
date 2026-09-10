@@ -463,9 +463,7 @@ class DiffusionPolicy(BasePolicy):
         # Observation
         # --------------------------------------------------
 
-        assert "pixels" in info_dict, (
-            "'pixels' must be provided for DiffusionPolicy"
-        )
+        assert "pixels" in info_dict, ("'pixels' must be provided for DiffusionPolicy")
 
         pixels = info_dict["pixels"].to(
             device=self.device,
@@ -476,10 +474,7 @@ class DiffusionPolicy(BasePolicy):
         # pixels: (B, To, C, H, W)
         B = pixels.shape[0]
 
-        To = min(
-            self.obs_horizon,
-            pixels.shape[1],
-        )
+        To = min(self.obs_horizon, pixels.shape[1],)
 
         pixels = pixels[:, :To]
 
@@ -547,10 +542,7 @@ class DiffusionPolicy(BasePolicy):
 
         action = naction_pred[:, start:end]
 
-        return {
-            "action": action,
-            "action_pred": naction_pred,
-        }
+        return {"action": action, "action_pred": naction_pred,}
 
     def get_action(
         self,
@@ -599,6 +591,7 @@ class DiffusionPolicy(BasePolicy):
         self,
         info_dict: dict,
         num_samples: int = 1,
+        denormalize: bool = False,
     ) -> torch.Tensor:
         """
         Sample multiple candidate action trajectories.
@@ -689,6 +682,21 @@ class DiffusionPolicy(BasePolicy):
             self.pred_horizon,
             self.action_dim,
         )
+
+
+        if denormalize:
+            shape = trajectories.shape
+            traj_np = trajectories.detach().cpu().numpy()
+            traj_np = traj_np.reshape(-1, shape[-1])
+
+            if "action_cartesian" in self.process:
+                traj_np = self.process["action_cartesian"].inverse_transform(traj_np)
+            elif "action" in self.process:
+                traj_np = self.process["action"].inverse_transform(traj_np)
+            elif "action_joint" in self.process:
+                traj_np = self.process["action_joint"].inverse_transform(traj_np)
+
+            trajectories = torch.from_numpy(traj_np.reshape(shape)).to(device=self.device, dtype=self.dtype,)
 
         return trajectories
 
@@ -828,7 +836,6 @@ class GPCPolicy(BasePolicy):
         reward_fn,
         num_candidates: int = 50,
         action_horizon: int | None = None,
-        action_converter=None,
         process = None,
         transform = None,
         **kwargs,
@@ -852,11 +859,6 @@ class GPCPolicy(BasePolicy):
             action_horizon = diffusion_policy.action_horizon
 
         self.action_horizon = action_horizon
-
-        # Optional:
-        # convert DP-normalized actions into the action representation
-        # expected by the World Model.
-        self.action_converter = action_converter
         
         
         #LeWM用統計
@@ -970,6 +972,7 @@ class GPCPolicy(BasePolicy):
             self.diffusion_policy.sample_action_sequences(
                 info_dict,
                 num_samples=self.num_candidates,
+                denormalize=True,
             )
         )
 
@@ -995,32 +998,17 @@ class GPCPolicy(BasePolicy):
         # Same convention as standalone DiffusionPolicy.
         start = self.diffusion_policy.obs_horizon - 1
 
-        end = min(
-            start + self.action_horizon,
-            T,
-        )
+        end = min(start + self.action_horizon, T,)
 
         if end <= start:
-            raise ValueError(
-                f"Invalid action range: start={start}, end={end}"
-            )
+            raise ValueError(f"Invalid action range: start={start}, end={end}")
 
-        candidate_actions = action_sequences[
-            :, :, start:end
-        ]
+        candidate_actions = action_sequences[:, :, start:end]
 
         # (B, K, action_horizon, action_dim)
 
-        # --------------------------------------------------
-        # 3. Convert action representation for World Model
-        # --------------------------------------------------
+        wm_actions = self.normalize_action_for_world_model(candidate_actions)
 
-        wm_actions = candidate_actions
-
-        if self.action_converter is not None:
-            wm_actions = self.action_converter(
-                candidate_actions
-            )
 
         # --------------------------------------------------
         # 4. World Model rollout
@@ -1085,21 +1073,6 @@ class GPCPolicy(BasePolicy):
 
         action = action.detach().cpu().numpy()
 
-        if "action_cartesian" in self.diffusion_policy.process:
-            action = self.diffusion_policy.process[
-                "action_cartesian"
-            ].inverse_transform(action)
-
-        elif "action" in self.diffusion_policy.process:
-            action = self.diffusion_policy.process[
-                "action"
-            ].inverse_transform(action)
-
-        elif "action_joint" in self.diffusion_policy.process:
-            action = self.diffusion_policy.process[
-                "action_joint"
-            ].inverse_transform(action)
-
         return action
 
     def encode_goal(
@@ -1130,7 +1103,6 @@ class GPCPolicy(BasePolicy):
         # --------------------------------------------------
         # Build goal observation
         # --------------------------------------------------
-
 
         goal_info = {k: v for k, v in info.items() if k == "goal" or k.startswith("goal_")}
 
@@ -1171,6 +1143,33 @@ class GPCPolicy(BasePolicy):
         goal_output = self.world_model.encode(goal_info)
 
         return goal_output["emb"]
+
+
+    def normalize_action_for_world_model(self, action_sequences: torch.Tensor,) -> torch.Tensor:
+        shape = action_sequences.shape
+
+        action_np = (action_sequences.detach().cpu().numpy().reshape(-1, shape[-1]))
+
+        if "action_cartesian" in self.process:
+            action_np = self.process["action_cartesian"].transform(action_np)
+
+        elif "action" in self.process:
+            action_np = self.process["action"].transform(action_np)
+
+        elif "action_joint" in self.process:
+            action_np = self.process["action_joint"].transform(action_np)
+
+        else:
+            raise KeyError("No action processor found for World Model")
+
+        action = torch.from_numpy(action_np.reshape(shape)).to(
+            device=action_sequences.device,
+            dtype=action_sequences.dtype,
+        )
+
+        return action
+
+
 
 
 
