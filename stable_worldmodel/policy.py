@@ -348,19 +348,17 @@ class DiffusionPolicy(BasePolicy):
         num_inference_steps: int | None = None,
         process=None,
         transform=None,
+        wrist_obs_encoder=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
 
         self.type = "diffusion"
 
-        # ConditionalUnet1D
         self.model = model
-
-        # image observation encoder
         self.obs_encoder = obs_encoder
+        self.wrist_obs_encoder = wrist_obs_encoder
 
-        # DDPM / DDIM scheduler
         self.noise_scheduler = noise_scheduler
 
         self.pred_horizon = pred_horizon
@@ -454,67 +452,23 @@ class DiffusionPolicy(BasePolicy):
                 "action_pred": full predicted trajectory
             }
         """
-
-        # Do not modify caller's dictionary
+        
         info_dict = dict(info_dict)
-
-        # Same preprocessing mechanism as other policies
         info_dict = self._prepare_info(info_dict)
 
-        # --------------------------------------------------
-        # Observation
-        # --------------------------------------------------
-
-        assert "pixels" in info_dict, ("'pixels' must be provided for DiffusionPolicy")
-
-        pixels = info_dict["pixels"].to(
-            device=self.device,
-            dtype=self.dtype,
-        )
-
-        # expected:
-        # pixels: (B, To, C, H, W)
-        B = pixels.shape[0]
-
-        To = min(self.obs_horizon, pixels.shape[1],)
-
-        pixels = pixels[:, :To]
-
-        # --------------------------------------------------
-        # Observation encoder
-        # --------------------------------------------------
-
-        # (B, To, C, H, W)
-        # ->
-        # (B * To, C, H, W)
-
-        pixels_flat = pixels.reshape(
-            B * To,
-            *pixels.shape[2:],
-        )
-
-        obs_features = self.obs_encoder(
-            pixels_flat
-        )
-
-        # Some encoders may return tuple / dict.
-        # Initially assume Tensor.
-        if not torch.is_tensor(obs_features):
-            raise TypeError(
-                "obs_encoder must return a torch.Tensor. "
-                f"Got {type(obs_features)}"
+        if "pixels" not in info_dict:
+            raise KeyError(
+                "'pixels' must be provided for DiffusionPolicy"
             )
 
-        # (B * To, Do)
-        # ->
-        # (B, To * Do)
-
-        obs_features = obs_features.reshape(
-            B,
-            -1,
+        global_cond, B, To = self._encode_observation(
+            pixels=info_dict["pixels"],
+            wrist_pixels=info_dict.get(
+                "wrist_pixels",
+                None,
+            ),
         )
 
-        global_cond = obs_features
 
         # --------------------------------------------------
         # Reverse diffusion
@@ -608,55 +562,34 @@ class DiffusionPolicy(BasePolicy):
         info_dict = dict(info_dict)
         info_dict = self._prepare_info(info_dict)
 
-        assert "pixels" in info_dict
-
-        pixels = info_dict["pixels"].to(
-            device=self.device,
-            dtype=self.dtype,
-        )
-
-        B = pixels.shape[0]
-
-        To = min(
-            self.obs_horizon,
-            pixels.shape[1],
-        )
-
-        pixels = pixels[:, :To]
-
-        # --------------------------------------------------
-        # Encode observation once
-        # --------------------------------------------------
-
-        pixels_flat = pixels.reshape(
-            B * To,
-            *pixels.shape[2:],
-        )
-
-        obs_features = self.obs_encoder(
-            pixels_flat
-        )
-
-        if not torch.is_tensor(obs_features):
-            raise TypeError(
-                "obs_encoder must return a torch.Tensor. "
-                f"Got {type(obs_features)}"
+        if "pixels" not in info_dict:
+            raise KeyError(
+                "'pixels' must be provided for DiffusionPolicy"
             )
 
-        obs_features = obs_features.reshape(
-            B,
-            -1,
+        global_cond, B, To = self._encode_observation(
+            pixels=info_dict["pixels"],
+            wrist_pixels=info_dict.get(
+                "wrist_pixels",
+                None,
+            ),
         )
-
-        # --------------------------------------------------
-        # Repeat observation condition K times
-        # --------------------------------------------------
 
         global_cond = (
-            obs_features[:, None, :]
-            .expand(B, num_samples, obs_features.shape[-1],)
-            .reshape(B * num_samples, -1,)
+            global_cond[:, None, :]
+            .expand(
+                B,
+                num_samples,
+                global_cond.shape[-1],
+            )
+            .reshape(
+                B * num_samples,
+                -1,
+            )
         )
+        
+
+
 
         # --------------------------------------------------
         # Generate K trajectories
@@ -718,10 +651,11 @@ class DiffusionPolicy(BasePolicy):
 
         action is assumed to already be normalized.
         """
+        pixels = batch["pixels"]
 
-        pixels = batch["pixels"].to(
-            device=self.device,
-            dtype=self.dtype,
+        wrist_pixels = batch.get(
+            "wrist_pixels",
+            None,
         )
 
         actions = batch["action"].to(
@@ -729,37 +663,12 @@ class DiffusionPolicy(BasePolicy):
             dtype=self.dtype,
         )
 
-        B = actions.shape[0]
-
-        To = min(
-            self.obs_horizon,
-            pixels.shape[1],
-        )
-
-        pixels = pixels[:, :To]
-
-        # --------------------------------------------------
-        # Encode observations
-        # --------------------------------------------------
-
-        pixels_flat = pixels.reshape(
-            B * To,
-            *pixels.shape[2:],
-        )
-
-        obs_features = self.obs_encoder(
-            pixels_flat
-        )
-
-        if not torch.is_tensor(obs_features):
-            raise TypeError(
-                "obs_encoder must return a torch.Tensor. "
-                f"Got {type(obs_features)}"
-            )
-
-        global_cond = obs_features.reshape(
-            B,
-            -1,
+        global_cond, B, To = self._encode_observation(
+            pixels=batch["pixels"],
+            wrist_pixels=batch.get(
+                "wrist_pixels",
+                None,
+            ),
         )
 
         # --------------------------------------------------
@@ -816,6 +725,119 @@ class DiffusionPolicy(BasePolicy):
         )
 
         return loss
+
+
+    def _encode_observation(
+        self,
+        pixels,
+        wrist_pixels=None,
+    ):
+        pixels = pixels.to(
+            device=self.device,
+            dtype=self.dtype,
+        )
+
+        B = pixels.shape[0]
+
+        if self.wrist_obs_encoder is None:
+            To = min(
+                self.obs_horizon,
+                pixels.shape[1],
+            )
+
+            pixels = pixels[:, :To]
+
+            pixels_flat = pixels.reshape(
+                B * To,
+                *pixels.shape[2:],
+            )
+
+            obs_features = self.obs_encoder(
+                pixels_flat
+            )
+
+            if not torch.is_tensor(obs_features):
+                raise TypeError(
+                    "obs_encoder must return a torch.Tensor"
+                )
+
+            global_cond = obs_features.reshape(
+                B,
+                -1,
+            )
+
+            return global_cond, B, To
+
+        if wrist_pixels is None:
+            raise KeyError(
+                "'wrist_pixels' is required for multiview DiffusionPolicy"
+            )
+
+        wrist_pixels = wrist_pixels.to(
+            device=self.device,
+            dtype=self.dtype,
+        )
+
+        if pixels.shape[:2] != wrist_pixels.shape[:2]:
+            raise ValueError(
+                "pixels and wrist_pixels must have the same "
+                f"(B, T), got {pixels.shape[:2]} "
+                f"and {wrist_pixels.shape[:2]}"
+            )
+
+        To = min(
+            self.obs_horizon,
+            pixels.shape[1],
+            wrist_pixels.shape[1],
+        )
+
+        pixels = pixels[:, :To]
+        wrist_pixels = wrist_pixels[:, :To]
+
+        pixels_flat = pixels.reshape(
+            B * To,
+            *pixels.shape[2:],
+        )
+
+        wrist_pixels_flat = wrist_pixels.reshape(
+            B * To,
+            *wrist_pixels.shape[2:],
+        )
+
+        overhead_features = self.obs_encoder(
+            pixels_flat
+        )
+
+        wrist_features = self.wrist_obs_encoder(
+            wrist_pixels_flat
+        )
+
+        if not torch.is_tensor(overhead_features):
+            raise TypeError(
+                "obs_encoder must return a torch.Tensor"
+            )
+
+        if not torch.is_tensor(wrist_features):
+            raise TypeError(
+                "wrist_obs_encoder must return a torch.Tensor"
+            )
+
+        obs_features = torch.cat(
+            [
+                overhead_features,
+                wrist_features,
+            ],
+            dim=-1,
+        )
+
+        global_cond = obs_features.reshape(
+            B,
+            -1,
+        )
+
+        return global_cond, B, To
+
+
 
 
 
