@@ -898,28 +898,14 @@ class GPCPolicy(BasePolicy):
 
         B, K, T, D = action_sequences.shape
 
-        # --------------------------------------------------
-        # Prepare observation for K candidate rollouts
-        # --------------------------------------------------
 
         for key, value in list(wm_info.items()):
             if not torch.is_tensor(value): continue
-
-            # Current LeWM rollout expects a candidate dimension S.
-            #
-            # e.g.
-            # pixels:
-            #   (B, T_obs, C, H, W)
-            # ->
-            #   (B, K, T_obs, C, H, W)
 
             if value.shape[0] != B: continue
 
             wm_info[key] = (value[:, None].expand(B, K, *value.shape[1:],))
 
-        # --------------------------------------------------
-        # Move inputs to World Model device
-        # --------------------------------------------------
 
         device = next(self.world_model.parameters()).device
 
@@ -929,25 +915,13 @@ class GPCPolicy(BasePolicy):
 
         action_sequences = action_sequences.to(device)
 
-        # --------------------------------------------------
-        # Encode goal
-        # --------------------------------------------------
-
         goal_emb = self.encode_goal(info_dict)
-
-
-        # --------------------------------------------------
-        # LeWM rollout
-        # --------------------------------------------------
 
         rollout_output = self.world_model.rollout(wm_info, action_sequences,)
         
         rollout_output["goal_emb"] = goal_emb
 
         return rollout_output
-
-
-
 
 
 
@@ -960,9 +934,22 @@ class GPCPolicy(BasePolicy):
         """
         Select an action with GPC-RANK.
 
-        Expected use case:
-            batch size B = 1 for real-robot inference.
+        info_dict:
+            LeWM用の観測。
+
+        kwargs["dp_info_dict"]:
+            DiffusionPolicy用の観測履歴。
+            指定されなければinfo_dictを使用する。
         """
+
+        # --------------------------------------------------
+        # 0. Diffusion Policy observation
+        # --------------------------------------------------
+
+        dp_info_dict = kwargs.get(
+            "dp_info_dict",
+            info_dict,
+        )
 
         # --------------------------------------------------
         # 1. Generate Diffusion Policy proposals
@@ -970,14 +957,11 @@ class GPCPolicy(BasePolicy):
 
         action_sequences = (
             self.diffusion_policy.sample_action_sequences(
-                info_dict,
+                dp_info_dict,
                 num_samples=self.num_candidates,
                 denormalize=True,
             )
         )
-
-        # Expected:
-        # (B, K, pred_horizon, action_dim)
 
         if action_sequences.ndim != 4:
             raise ValueError(
@@ -989,26 +973,39 @@ class GPCPolicy(BasePolicy):
         B, K, T, D = action_sequences.shape
 
         if K != self.num_candidates:
-            raise ValueError(f"Expected K={self.num_candidates}, got K={K}")
+            raise ValueError(
+                f"Expected K={self.num_candidates}, got K={K}"
+            )
 
         # --------------------------------------------------
-        # 2. Extract actions corresponding to the future
+        # 2. Extract actions corresponding to future
         # --------------------------------------------------
 
-        # Same convention as standalone DiffusionPolicy.
         start = self.diffusion_policy.obs_horizon - 1
 
-        end = min(start + self.action_horizon, T,)
+        end = min(
+            start + self.action_horizon,
+            T,
+        )
 
         if end <= start:
-            raise ValueError(f"Invalid action range: start={start}, end={end}")
+            raise ValueError(
+                f"Invalid action range: start={start}, end={end}"
+            )
 
-        candidate_actions = action_sequences[:, :, start:end]
+        candidate_actions = action_sequences[
+            :,
+            :,
+            start:end,
+        ]
 
-        # (B, K, action_horizon, action_dim)
+        # --------------------------------------------------
+        # 3. Normalize for World Model
+        # --------------------------------------------------
 
-        wm_actions = self.normalize_action_for_world_model(candidate_actions)
-
+        wm_actions = self.normalize_action_for_world_model(
+            candidate_actions
+        )
 
         # --------------------------------------------------
         # 4. World Model rollout
@@ -1020,7 +1017,7 @@ class GPCPolicy(BasePolicy):
         )
 
         # --------------------------------------------------
-        # 5. Evaluate candidate trajectories
+        # 5. Evaluate
         # --------------------------------------------------
 
         rewards = self.reward_fn(
@@ -1033,9 +1030,6 @@ class GPCPolicy(BasePolicy):
                 "reward_fn must return a torch.Tensor"
             )
 
-        # Expected:
-        # rewards: (B, K)
-
         if rewards.shape != (B, K):
             raise ValueError(
                 "reward_fn must return shape "
@@ -1044,7 +1038,7 @@ class GPCPolicy(BasePolicy):
             )
 
         # --------------------------------------------------
-        # 6. Pick highest-reward candidate
+        # 6. Select best candidate
         # --------------------------------------------------
 
         best_idx = torch.argmax(
@@ -1062,18 +1056,16 @@ class GPCPolicy(BasePolicy):
             best_idx,
         ]
 
-        # (B, action_horizon, action_dim)
-
-        # Initially execute only the first action.
+        # Execute first action only
         action = best_sequence[:, 0]
 
-        # --------------------------------------------------
-        # 7. Denormalize DP action for environment
-        # --------------------------------------------------
+        return (
+            action
+            .detach()
+            .cpu()
+            .numpy()
+        )
 
-        action = action.detach().cpu().numpy()
-
-        return action
 
     def encode_goal(
         self,
