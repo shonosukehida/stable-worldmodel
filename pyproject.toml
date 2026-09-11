@@ -26,6 +26,8 @@ dependencies = [
   "tqdm",
   "typer",
   "rich",
+  "diffusers>=0.40.0",
+  "matplotlib>=3.10.9",
 ]
 
 [project.scripts]

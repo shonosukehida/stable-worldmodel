@@ -17,6 +17,7 @@ import gymnasium as gym
 
 
 from stable_worldmodel.plot.plot import plot_cem_cost_convergence, plot_cem_sequence_transition_colormap
+from stable_worldmodel.reward import latent_goal_reward
 
 
 @dataclass(frozen=True)
@@ -334,6 +335,838 @@ class FeedForwardPolicy(BasePolicy):
         return action
 
 
+class DiffusionPolicy(BasePolicy):
+    def __init__(
+        self,
+        model,
+        obs_encoder,
+        noise_scheduler,
+        pred_horizon: int,
+        obs_horizon: int,
+        action_horizon: int,
+        action_dim: int,
+        num_inference_steps: int | None = None,
+        process=None,
+        transform=None,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+
+        self.type = "diffusion"
+
+        # ConditionalUnet1D
+        self.model = model
+
+        # image observation encoder
+        self.obs_encoder = obs_encoder
+
+        # DDPM / DDIM scheduler
+        self.noise_scheduler = noise_scheduler
+
+        self.pred_horizon = pred_horizon
+        self.obs_horizon = obs_horizon
+        self.action_horizon = action_horizon
+        self.action_dim = action_dim
+
+        self.process = process or {}
+        self.transform = transform or {}
+
+        if num_inference_steps is None:
+            num_inference_steps = (
+                noise_scheduler.config.num_train_timesteps
+            )
+
+        self.num_inference_steps = num_inference_steps
+
+    @property
+    def device(self):
+        return next(self.model.parameters()).device
+
+    @property
+    def dtype(self):
+        return next(self.model.parameters()).dtype
+
+    def conditional_sample(
+        self,
+        condition_data: torch.Tensor,
+        global_cond: torch.Tensor,
+        generator=None,
+    ) -> torch.Tensor:
+        """
+        Run reverse diffusion and generate an action trajectory.
+
+        Args:
+            condition_data:
+                Initial trajectory tensor.
+                Shape: (B, pred_horizon, action_dim)
+
+            global_cond:
+                Encoded observation condition.
+                Shape: (B, obs_feature_dim * obs_horizon)
+
+        Returns:
+            trajectory:
+                Normalized action trajectory.
+                Shape: (B, pred_horizon, action_dim)
+        """
+
+        trajectory = torch.randn(
+            size=condition_data.shape,
+            dtype=condition_data.dtype,
+            device=condition_data.device,
+            generator=generator,
+        )
+
+        self.noise_scheduler.set_timesteps(
+            self.num_inference_steps
+        )
+
+        for t in self.noise_scheduler.timesteps:
+
+            # predict noise
+            model_output = self.model(
+                trajectory,
+                t,
+                local_cond=None,
+                global_cond=global_cond,
+            )
+
+            # x_t -> x_(t-1)
+            trajectory = self.noise_scheduler.step(
+                model_output,
+                t,
+                trajectory,
+                generator=generator,
+            ).prev_sample
+
+        return trajectory
+
+    def predict_action(
+        self,
+        info_dict: dict,
+    ) -> dict[str, torch.Tensor]:
+        """
+        Predict one action trajectory from the current observation.
+
+        Returns:
+            {
+                "action":      actions actually used by the policy,
+                "action_pred": full predicted trajectory
+            }
+        """
+
+        # Do not modify caller's dictionary
+        info_dict = dict(info_dict)
+
+        # Same preprocessing mechanism as other policies
+        info_dict = self._prepare_info(info_dict)
+
+        # --------------------------------------------------
+        # Observation
+        # --------------------------------------------------
+
+        assert "pixels" in info_dict, ("'pixels' must be provided for DiffusionPolicy")
+
+        pixels = info_dict["pixels"].to(
+            device=self.device,
+            dtype=self.dtype,
+        )
+
+        # expected:
+        # pixels: (B, To, C, H, W)
+        B = pixels.shape[0]
+
+        To = min(self.obs_horizon, pixels.shape[1],)
+
+        pixels = pixels[:, :To]
+
+        # --------------------------------------------------
+        # Observation encoder
+        # --------------------------------------------------
+
+        # (B, To, C, H, W)
+        # ->
+        # (B * To, C, H, W)
+
+        pixels_flat = pixels.reshape(
+            B * To,
+            *pixels.shape[2:],
+        )
+
+        obs_features = self.obs_encoder(
+            pixels_flat
+        )
+
+        # Some encoders may return tuple / dict.
+        # Initially assume Tensor.
+        if not torch.is_tensor(obs_features):
+            raise TypeError(
+                "obs_encoder must return a torch.Tensor. "
+                f"Got {type(obs_features)}"
+            )
+
+        # (B * To, Do)
+        # ->
+        # (B, To * Do)
+
+        obs_features = obs_features.reshape(
+            B,
+            -1,
+        )
+
+        global_cond = obs_features
+
+        # --------------------------------------------------
+        # Reverse diffusion
+        # --------------------------------------------------
+
+        condition_data = torch.zeros(
+            (
+                B,
+                self.pred_horizon,
+                self.action_dim,
+            ),
+            device=self.device,
+            dtype=self.dtype,
+        )
+
+        naction_pred = self.conditional_sample(
+            condition_data=condition_data,
+            global_cond=global_cond,
+        )
+
+        # --------------------------------------------------
+        # Action chunk
+        # --------------------------------------------------
+
+        start = To - 1
+        end = start + self.action_horizon
+
+        action = naction_pred[:, start:end]
+
+        return {"action": action, "action_pred": naction_pred,}
+
+    def get_action(
+        self,
+        info_dict: dict,
+        **kwargs,
+    ):
+        """
+        Standalone Diffusion Policy inference.
+        """
+
+        with torch.no_grad():
+            result = self.predict_action(
+                info_dict
+            )
+
+        action = result["action"]
+
+        # For standalone execution:
+        # currently return first action of action chunk
+        action = action[:, 0]
+
+        action = action.detach().cpu().numpy()
+
+        # --------------------------------------------------
+        # Denormalize
+        # --------------------------------------------------
+
+        if "action_cartesian" in self.process:
+            action = self.process[
+                "action_cartesian"
+            ].inverse_transform(action)
+
+        elif "action" in self.process:
+            action = self.process[
+                "action"
+            ].inverse_transform(action)
+
+        elif "action_joint" in self.process:
+            action = self.process[
+                "action_joint"
+            ].inverse_transform(action)
+
+        return action
+
+    def sample_action_sequences(
+        self,
+        info_dict: dict,
+        num_samples: int = 1,
+        denormalize: bool = False,
+    ) -> torch.Tensor:
+        """
+        Sample multiple candidate action trajectories.
+
+        Mainly used by GPCPolicy.
+
+        Returns:
+            Tensor:
+                (B, K, pred_horizon, action_dim)
+        """
+
+        info_dict = dict(info_dict)
+        info_dict = self._prepare_info(info_dict)
+
+        assert "pixels" in info_dict
+
+        pixels = info_dict["pixels"].to(
+            device=self.device,
+            dtype=self.dtype,
+        )
+
+        B = pixels.shape[0]
+
+        To = min(
+            self.obs_horizon,
+            pixels.shape[1],
+        )
+
+        pixels = pixels[:, :To]
+
+        # --------------------------------------------------
+        # Encode observation once
+        # --------------------------------------------------
+
+        pixels_flat = pixels.reshape(
+            B * To,
+            *pixels.shape[2:],
+        )
+
+        obs_features = self.obs_encoder(
+            pixels_flat
+        )
+
+        if not torch.is_tensor(obs_features):
+            raise TypeError(
+                "obs_encoder must return a torch.Tensor. "
+                f"Got {type(obs_features)}"
+            )
+
+        obs_features = obs_features.reshape(
+            B,
+            -1,
+        )
+
+        # --------------------------------------------------
+        # Repeat observation condition K times
+        # --------------------------------------------------
+
+        global_cond = (
+            obs_features[:, None, :]
+            .expand(B, num_samples, obs_features.shape[-1],)
+            .reshape(B * num_samples, -1,)
+        )
+
+        # --------------------------------------------------
+        # Generate K trajectories
+        # --------------------------------------------------
+
+        condition_data = torch.zeros(
+            (
+                B * num_samples,
+                self.pred_horizon,
+                self.action_dim,
+            ),
+            device=self.device,
+            dtype=self.dtype,
+        )
+
+        with torch.no_grad():
+            trajectories = self.conditional_sample(
+                condition_data=condition_data,
+                global_cond=global_cond,
+            )
+
+        trajectories = trajectories.reshape(
+            B,
+            num_samples,
+            self.pred_horizon,
+            self.action_dim,
+        )
+
+
+        if denormalize:
+            shape = trajectories.shape
+            traj_np = trajectories.detach().cpu().numpy()
+            traj_np = traj_np.reshape(-1, shape[-1])
+
+            if "action_cartesian" in self.process:
+                traj_np = self.process["action_cartesian"].inverse_transform(traj_np)
+            elif "action" in self.process:
+                traj_np = self.process["action"].inverse_transform(traj_np)
+            elif "action_joint" in self.process:
+                traj_np = self.process["action_joint"].inverse_transform(traj_np)
+
+            trajectories = torch.from_numpy(traj_np.reshape(shape)).to(device=self.device, dtype=self.dtype,)
+
+        return trajectories
+
+    def compute_loss(
+        self,
+        batch: dict,
+    ) -> torch.Tensor:
+        """
+        Diffusion Policy training loss.
+
+        Expected:
+            batch["pixels"]:
+                (B, To, C, H, W)
+
+            batch["action"]:
+                (B, pred_horizon, action_dim)
+
+        action is assumed to already be normalized.
+        """
+
+        pixels = batch["pixels"].to(
+            device=self.device,
+            dtype=self.dtype,
+        )
+
+        actions = batch["action"].to(
+            device=self.device,
+            dtype=self.dtype,
+        )
+
+        B = actions.shape[0]
+
+        To = min(
+            self.obs_horizon,
+            pixels.shape[1],
+        )
+
+        pixels = pixels[:, :To]
+
+        # --------------------------------------------------
+        # Encode observations
+        # --------------------------------------------------
+
+        pixels_flat = pixels.reshape(
+            B * To,
+            *pixels.shape[2:],
+        )
+
+        obs_features = self.obs_encoder(
+            pixels_flat
+        )
+
+        if not torch.is_tensor(obs_features):
+            raise TypeError(
+                "obs_encoder must return a torch.Tensor. "
+                f"Got {type(obs_features)}"
+            )
+
+        global_cond = obs_features.reshape(
+            B,
+            -1,
+        )
+
+        # --------------------------------------------------
+        # Sample diffusion noise
+        # --------------------------------------------------
+
+        noise = torch.randn_like(actions)
+
+        timesteps = torch.randint(
+            0,
+            self.noise_scheduler.config.num_train_timesteps,
+            (B,),
+            device=self.device,
+        ).long()
+
+        noisy_actions = (
+            self.noise_scheduler.add_noise(
+                actions,
+                noise,
+                timesteps,
+            )
+        )
+
+        # --------------------------------------------------
+        # Predict noise
+        # --------------------------------------------------
+
+        noise_pred = self.model(
+            noisy_actions,
+            timesteps,
+            local_cond=None,
+            global_cond=global_cond,
+        )
+
+        prediction_type = (
+            self.noise_scheduler.config.prediction_type
+        )
+
+        if prediction_type == "epsilon":
+            target = noise
+
+        elif prediction_type == "sample":
+            target = actions
+
+        else:
+            raise ValueError(
+                "Unsupported prediction type: "
+                f"{prediction_type}"
+            )
+
+        loss = torch.nn.functional.mse_loss(
+            noise_pred,
+            target,
+        )
+
+        return loss
+
+
+
+class GPCPolicy(BasePolicy):
+    """
+    GPC-RANK policy.
+
+    1. DiffusionPolicy generates K candidate action sequences.
+    2. World Model rolls out each candidate.
+    3. reward_fn evaluates the predicted trajectories.
+    4. The highest-reward candidate is selected.
+
+    GPC-OPT is not implemented here.
+    """
+
+    def __init__(
+        self,
+        diffusion_policy: DiffusionPolicy,
+        world_model,
+        reward_fn,
+        num_candidates: int = 50,
+        action_horizon: int | None = None,
+        process = None,
+        transform = None,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+
+        self.type = "gpc"
+
+        self.diffusion_policy = diffusion_policy
+        self.world_model = world_model
+
+        # reward_fn(
+        #     rollout_output,
+        #     info_dict,
+        # ) -> Tensor of shape (B, K)
+        self.reward_fn = reward_fn
+
+        self.num_candidates = num_candidates
+
+        if action_horizon is None:
+            action_horizon = diffusion_policy.action_horizon
+
+        self.action_horizon = action_horizon
+        
+        
+        #LeWM用統計
+        self.process = process or {}
+        self.transform = transform or {}
+
+    @property
+    def device(self):
+        return self.diffusion_policy.device
+
+
+    def rollout(
+        self,
+        info_dict: dict,
+        action_sequences: torch.Tensor,
+    ):
+        """
+        Roll out K candidate action sequences with LeWM.
+
+        Args:
+            info_dict:
+                Current observation information.
+
+            action_sequences:
+                Candidate actions for LeWM.
+                Shape: (B, K, T, action_dim)
+
+        Returns:
+            rollout_output:
+                Dictionary containing predicted embeddings.
+                rollout_output["predicted_emb"]:
+                    (B, K, T_pred, latent_dim)
+        """
+
+        wm_info = dict(info_dict)
+        wm_info = self._prepare_info(wm_info)
+
+        B, K, T, D = action_sequences.shape
+
+
+        for key, value in list(wm_info.items()):
+            if not torch.is_tensor(value): continue
+
+            if value.shape[0] != B: continue
+
+            wm_info[key] = (value[:, None].expand(B, K, *value.shape[1:],))
+
+
+        device = next(self.world_model.parameters()).device
+
+        for key, value in wm_info.items():
+            if torch.is_tensor(value):
+                wm_info[key] = value.to(device)
+
+        action_sequences = action_sequences.to(device)
+
+        goal_emb = self.encode_goal(info_dict)
+
+        rollout_output = self.world_model.rollout(wm_info, action_sequences,)
+        
+        rollout_output["goal_emb"] = goal_emb
+
+        return rollout_output
+
+
+
+    @torch.no_grad()
+    def get_action(
+        self,
+        info_dict: dict,
+        **kwargs,
+    ) -> np.ndarray:
+        """
+        Select an action with GPC-RANK.
+
+        info_dict:
+            LeWM用の観測。
+
+        kwargs["dp_info_dict"]:
+            DiffusionPolicy用の観測履歴。
+            指定されなければinfo_dictを使用する。
+        """
+
+        # --------------------------------------------------
+        # 0. Diffusion Policy observation
+        # --------------------------------------------------
+
+        dp_info_dict = kwargs.get(
+            "dp_info_dict",
+            info_dict,
+        )
+
+        # --------------------------------------------------
+        # 1. Generate Diffusion Policy proposals
+        # --------------------------------------------------
+
+        action_sequences = (
+            self.diffusion_policy.sample_action_sequences(
+                dp_info_dict,
+                num_samples=self.num_candidates,
+                denormalize=True,
+            )
+        )
+
+        if action_sequences.ndim != 4:
+            raise ValueError(
+                "Expected candidate actions with shape "
+                "(B, K, T, D), "
+                f"but got {action_sequences.shape}"
+            )
+
+        B, K, T, D = action_sequences.shape
+
+        if K != self.num_candidates:
+            raise ValueError(
+                f"Expected K={self.num_candidates}, got K={K}"
+            )
+
+        # --------------------------------------------------
+        # 2. Extract actions corresponding to future
+        # --------------------------------------------------
+
+        start = self.diffusion_policy.obs_horizon - 1
+
+        end = min(
+            start + self.action_horizon,
+            T,
+        )
+
+        if end <= start:
+            raise ValueError(
+                f"Invalid action range: start={start}, end={end}"
+            )
+
+        candidate_actions = action_sequences[
+            :,
+            :,
+            start:end,
+        ]
+
+        # --------------------------------------------------
+        # 3. Normalize for World Model
+        # --------------------------------------------------
+
+        wm_actions = self.normalize_action_for_world_model(
+            candidate_actions
+        )
+
+        # --------------------------------------------------
+        # 4. World Model rollout
+        # --------------------------------------------------
+
+        rollout_output = self.rollout(
+            info_dict=info_dict,
+            action_sequences=wm_actions,
+        )
+
+        # --------------------------------------------------
+        # 5. Evaluate
+        # --------------------------------------------------
+
+        rewards = self.reward_fn(
+            rollout_output,
+            info_dict,
+        )
+
+        if not torch.is_tensor(rewards):
+            raise TypeError(
+                "reward_fn must return a torch.Tensor"
+            )
+
+        if rewards.shape != (B, K):
+            raise ValueError(
+                "reward_fn must return shape "
+                f"(B, K)=({B}, {K}), "
+                f"but got {rewards.shape}"
+            )
+
+        # --------------------------------------------------
+        # 6. Select best candidate
+        # --------------------------------------------------
+
+        best_idx = torch.argmax(
+            rewards,
+            dim=1,
+        )
+
+        batch_idx = torch.arange(
+            B,
+            device=best_idx.device,
+        )
+
+        best_sequence = candidate_actions[
+            batch_idx,
+            best_idx,
+        ]
+
+        # Execute first action only
+        action = best_sequence[:, 0]
+
+        return (
+            action
+            .detach()
+            .cpu()
+            .numpy()
+        )
+
+
+    def encode_goal(
+        self,
+        info_dict: dict,
+    ) -> torch.Tensor:
+        """
+        Encode goal observation with LeWM.
+
+        Args:
+            info_dict:
+                Observation dictionary containing
+                "goal" and corresponding goal_* entries.
+
+        Returns:
+            goal_emb:
+                Encoded goal latent.
+                Shape: (B, T_goal, latent_dim)
+        """
+
+        if "goal" not in info_dict:
+            raise KeyError(
+                "'goal' must be provided in info_dict"
+            )
+
+        info = dict(info_dict)
+
+        # --------------------------------------------------
+        # Build goal observation
+        # --------------------------------------------------
+
+        goal_info = {k: v for k, v in info.items() if k == "goal" or k.startswith("goal_")}
+
+        # goal image -> pixels
+        goal_info["pixels"] = goal_info["goal"]
+
+        # goal_proprio -> proprio
+        # goal_xxx     -> xxx
+        for key in list(goal_info.keys()):
+            if key.startswith("goal_"):
+                new_key = key[len("goal_"):]
+                goal_info[new_key] = goal_info.pop(key)
+
+        goal_info.pop("goal", None)
+
+        # Goal encoding does not require actions
+        for key in ["action", "action_joint", "action_cartesian",]:
+            goal_info.pop(key, None)
+
+        # --------------------------------------------------
+        # LeWM preprocessing
+        # --------------------------------------------------
+        goal_info = self._prepare_info(goal_info)
+
+        # --------------------------------------------------
+        # Move to World Model device
+        # --------------------------------------------------
+
+        device = next(self.world_model.parameters()).device
+
+        for key, value in goal_info.items():
+            if torch.is_tensor(value):
+                goal_info[key] = value.to(device)
+
+        # --------------------------------------------------
+        # Encode goal
+        # --------------------------------------------------
+        goal_output = self.world_model.encode(goal_info)
+
+        return goal_output["emb"]
+
+
+    def normalize_action_for_world_model(self, action_sequences: torch.Tensor,) -> torch.Tensor:
+        shape = action_sequences.shape
+
+        action_np = (action_sequences.detach().cpu().numpy().reshape(-1, shape[-1]))
+
+        if "action_cartesian" in self.process:
+            action_np = self.process["action_cartesian"].transform(action_np)
+
+        elif "action" in self.process:
+            action_np = self.process["action"].transform(action_np)
+
+        elif "action_joint" in self.process:
+            action_np = self.process["action_joint"].transform(action_np)
+
+        else:
+            raise KeyError("No action processor found for World Model")
+
+        action = torch.from_numpy(action_np.reshape(shape)).to(
+            device=action_sequences.device,
+            dtype=action_sequences.dtype,
+        )
+
+        return action
+
+
+
+
+
 class WorldModelPolicy(BasePolicy):
     """Policy using a world model and planning solver for action selection."""
 
@@ -624,4 +1457,3 @@ def AutoCostModel(
 
 # Alias for backward compatibility and type hinting
 Policy = BasePolicy
-
