@@ -115,10 +115,11 @@ class HDF5Dataset(Dataset):
         keys_to_cache: Keys to load entirely into memory for faster access.
         cache_dir: Directory containing the dataset file.
     """
+    
 
     def __init__(
         self,
-        name: str,
+        name: str | None = None,
         frameskip: int = 1,
         num_steps: int = 1,
         transform: Callable[[dict], dict] | None = None,
@@ -126,11 +127,40 @@ class HDF5Dataset(Dataset):
         keys_to_cache: list[str] | None = None,
         keys_to_merge: dict[str, list[str] | str] | None = None,
         cache_dir: str | Path | None = None,
+        path: str | Path | None = None,
     ) -> None:
-        datasets_dir = get_cache_dir(cache_dir, sub_folder='datasets')
-        self.h5_path = Path(datasets_dir, f'{name}.h5')
+
+        if path is not None:
+            # Explicit path takes precedence.
+            self.h5_path = Path(path).expanduser()
+
+        else:
+            # Backward-compatible dataset resolution.
+            if name is None:
+                raise ValueError(
+                    "Either 'name' or 'path' must be specified."
+                )
+
+            datasets_dir = get_cache_dir(
+                cache_dir,
+                sub_folder='datasets',
+            )
+
+            self.h5_path = Path(
+                datasets_dir,
+                f'{name}.h5',
+            )
+
+        if not self.h5_path.is_file():
+            raise FileNotFoundError(
+                f"Dataset not found: {self.h5_path}"
+            )
+
         self.h5_file: h5py.File | None = None
         self._cache: dict[str, np.ndarray] = {}
+
+
+
 
         with h5py.File(self.h5_path, 'r') as f:
             lengths, offsets = f['ep_len'][:], f['ep_offset'][:]
