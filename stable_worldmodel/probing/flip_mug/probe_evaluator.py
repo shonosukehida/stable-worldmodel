@@ -105,161 +105,83 @@ class ProbingEvaluator:
         target_keys=(),
         is_val=False,
     ):
+        """Compare one-step targets within each history-aware dataset window.
+
+        Returns current_z, true_z, pred_z as (N,D), actions as (N,A),
+        target values at the next timestep, and dataset window indices.
+        No artificial shared initial point is prepended.
         """
-        連続するデータについて、各時刻の真のencoder表現から
-        predictorの1-step予測を計算する。
-
-        保存する対応:
-            true_z[0] = Encoder(o_0)
-            pred_z[0] = Encoder(o_0)
-
-            true_z[t+1] = Encoder(o_{t+1})
-            pred_z[t+1] = Predictor(Encoder(o_t), a_t)
-
-        Returns:
-            true_z:      (N+1, D)
-            pred_z:      (N+1, D)
-            current_z:   (N, D)
-            actions:     (N, A)
-            targets:     dict[str, np.ndarray]
-            indices:     (N,)
-        """
-        if action_key is None:
-            action_key = self.action_key
-
+        action_key = self.action_key if action_key is None else action_key
         dataset = self._get_dataset(is_val)
+        history_size = self._get_history_size()
+        if start_idx < 0 or start_idx >= len(dataset):
+            raise ValueError(f"Invalid start_idx={start_idx}, len(dataset)={len(dataset)}")
+        if max_horizon <= 0:
+            raise ValueError(f"max_horizon must be positive, got {max_horizon}")
 
-        if start_idx < 0:
-            raise ValueError(
-                f"start_idx must be non-negative, got {start_idx}"
-            )
-
-        end_idx = min(
-            start_idx + max_horizon,
-            len(dataset) - 1,
-        )
-        print("len(dataset): ", len(dataset))
-
-        if end_idx <= start_idx:
-            raise RuntimeError(
-                f"No transitions are available: "
-                f"start_idx={start_idx}, len(dataset)={len(dataset)}"
-            )
-
-        current_list = []
-        true_list = []
-        pred_list = []
-        action_list = []
-        index_list = []
-
+        current_list, true_list, pred_list = [], [], []
+        action_list, index_list = [], []
         targets = {key: [] for key in target_keys}
-
-        # -------------------------------------------------
-        # 初期状態 z_0 を true/pred の両方に保存
-        # -------------------------------------------------
-        initial_sample = dataset[start_idx]
-        
-        initial_z = self._encode_state(
-            initial_sample,
-            pixel_key=pixel_key,
-            proprio_key="proprio",
-        )
-
-        initial_z_np = initial_z.squeeze(0).cpu().numpy()
-
-        true_list.append(initial_z_np)
-        pred_list.append(initial_z_np.copy())
-
-        # -------------------------------------------------
-        # 1-step prediction
-        # -------------------------------------------------
+        previous_sample = None
         for idx in tqdm(
-            range(start_idx, end_idx),
+            range(start_idx, min(start_idx + max_horizon, len(dataset))),
             desc="Collecting one-step rollout latents",
         ):
-            sample_t = dataset[idx]
-            sample_tp1 = dataset[idx + 1]
-
-            if not self._is_consecutive_transition(
-                sample_t,
-                sample_tp1,
-            ):
+            sample = dataset[idx]
+            # Keep trajectory plots within one episode, but predict entirely
+            # from this window (never use the adjacent sample as the target).
+            if previous_sample is not None and not self._is_consecutive_transition(previous_sample, sample):
                 break
+            previous_sample = sample
+            info = {
+                "pixels": self._prepare_pixel_sequence(sample[pixel_key], pixel_key),
+                "wrist_pixels": self._prepare_pixel_sequence(sample["wrist_pixels"], "wrist_pixels"),
+                "proprio": self._prepare_proprio_sequence(sample["proprio"]),
+                action_key: self._prepare_action_sequence(sample[action_key], action_key),
+            }
+            for key in ("pixels", "wrist_pixels", "proprio"):
+                assert info[key].shape[1] >= history_size + 1, (
+                    f"{key}: expected at least {history_size + 1} timesteps, got {info[key].shape}"
+                )
+            assert info[action_key].shape[1] >= history_size
 
-            current_z = self._encode_state(
-                sample_t,
-                pixel_key=pixel_key,
-                proprio_key="proprio",
-            )
+            output = self.model.encode(info)
+            emb, act_emb = output["emb"], output["act_emb"]
+            assert emb.ndim == 3 and emb.shape[1] >= history_size + 1
+            assert act_emb.ndim == 3 and act_emb.shape[1] >= history_size
+            pred_emb = self.model.predict(emb[:, :history_size], act_emb[:, :history_size])
+            current_z = emb[:, history_size - 1]
+            true_next_z = emb[:, history_size]
+            pred_next_z = pred_emb[:, -1]
+            assert current_z.shape == true_next_z.shape == pred_next_z.shape
+            assert current_z.ndim == 2 and current_z.shape[0] == 1
 
-            true_next_z = self._encode_state(
-                sample_tp1,
-                pixel_key=pixel_key,
-                proprio_key="proprio",
-            )
-
-            action = self._prepare_action(
-                sample_t[action_key],
-                action_key=action_key,
-            )
-
-            pred_next_z = self._predict_next_latent(
-                current_z,
-                action,
-            )
-
-            current_list.append(
-                current_z.squeeze(0).cpu().numpy()
-            )
-
-            true_list.append(
-                true_next_z.squeeze(0).cpu().numpy()
-            )
-
-            pred_list.append(
-                pred_next_z.squeeze(0).cpu().numpy()
-            )
-
-            action_list.append(
-                action.squeeze(0).cpu().numpy()
-            )
-
+            current_list.append(current_z[0].cpu().float().numpy())
+            true_list.append(true_next_z[0].cpu().float().numpy())
+            pred_list.append(pred_next_z[0].cpu().float().numpy())
+            action_list.append(info[action_key][0, history_size - 1].cpu().numpy())
             index_list.append(idx)
-
             for key in target_keys:
-                if key not in sample_tp1:
+                if key not in sample:
                     continue
-
-                value = sample_tp1[key]
-
-                if torch.is_tensor(value):
-                    value = value.detach().cpu().numpy()
-                else:
-                    value = np.asarray(value)
-
-                if value.ndim >= 2:
-                    value = value[-1]
-
+                value = sample[key]
+                value = value.detach().cpu().numpy() if torch.is_tensor(value) else np.asarray(value)
+                if value.ndim > 0:
+                    assert value.shape[0] >= history_size + 1, f"{key}: missing target timestep"
+                    value = value[history_size]
                 targets[key].append(value)
 
-        if len(action_list) == 0:
-            raise RuntimeError(
-                "No valid one-step transitions were collected. "
-                "The selected start index may be at an episode boundary."
-            )
-
-        targets = {
-            key: np.stack(values, axis=0)
-            for key, values in targets.items()
-            if values
-        }
-
+        current_z = np.stack(current_list)
+        true_z = np.stack(true_list)
+        pred_z = np.stack(pred_list)
+        print("pred_true_mse:", np.mean((pred_z - true_z) ** 2))
+        print("copy_baseline:", np.mean((current_z - true_z) ** 2))
         return {
-            "current_z": np.stack(current_list, axis=0),
-            "true_z": np.stack(true_list, axis=0),
-            "pred_z": np.stack(pred_list, axis=0),
-            "actions": np.stack(action_list, axis=0),
-            "targets": targets,
+            "current_z": current_z,
+            "true_z": true_z,
+            "pred_z": pred_z,
+            "actions": np.stack(action_list),
+            "targets": {key: np.stack(values) for key, values in targets.items() if values},
             "indices": np.asarray(index_list),
         }
 
@@ -275,6 +197,8 @@ class ProbingEvaluator:
         is_val=False,
     ):
         """
+        NOTE: This T=1 rollout is not train-compatible for history_size > 1.
+
         1つのエピソード内でclosed-loop latent rolloutを行う。
 
         保存される系列:
@@ -420,6 +344,8 @@ class ProbingEvaluator:
         is_val=False,
     ):
         """
+        NOTE: This T=1 rollout is not train-compatible for history_size > 1.
+
         1 episode 内の複数時刻を始点として、
         pred_step-step closed-loop rolloutを収集する。
 
@@ -846,6 +772,53 @@ class ProbingEvaluator:
             "indices": data["indices"],
         }
 
+
+    def _get_history_size(self):
+        return self.resolve_history_size(self.config, self.model)
+
+    @staticmethod
+    def resolve_history_size(config, model):
+        # Callers normally pass cfg.eval.probing, not the full training config.
+        # Do not use world.history_size: it describes the planning environment.
+        def get(config, key):
+            if config is None:
+                return None
+            return config.get(key) if hasattr(config, "get") else getattr(config, key, None)
+
+        history_size = get(config, "history_size")
+        if history_size is None:
+            history_size = get(get(config, "wm"), "history_size")
+        if history_size is None:
+            pos_embedding = getattr(getattr(model, "predictor", None), "pos_embedding", None)
+            history_size = pos_embedding.shape[1] if pos_embedding is not None else 3
+        if int(history_size) != history_size or history_size <= 0:
+            raise ValueError(f"history_size must be a positive integer, got {history_size}")
+        return int(history_size)
+
+    def _prepare_pixel_sequence(self, pixels, pixel_key="pixels"):
+        pixels = torch.as_tensor(pixels)
+        if pixels.ndim != 4:
+            raise ValueError(f"Expected {pixel_key} shape (T,C,H,W), got {tuple(pixels.shape)}")
+        if self.transform is not None:
+            pixels = torch.stack([self.transform[pixel_key](frame) for frame in pixels])
+        return pixels.unsqueeze(0).to(self.device)
+
+    def _prepare_proprio_sequence(self, proprio, proprio_key="proprio"):
+        value = proprio.detach().cpu().numpy() if torch.is_tensor(proprio) else np.asarray(proprio)
+        if value.ndim != 2 or value.shape[1] != 8:
+            raise ValueError(f"Expected proprio shape (T,8), got {value.shape}")
+        if self.process is not None and proprio_key in self.process:
+            value = self.process[proprio_key].transform(value)
+        return torch.from_numpy(np.asarray(value, dtype=np.float32)).unsqueeze(0).to(self.device)
+
+    def _prepare_action_sequence(self, action, action_key):
+        value = action.detach().cpu().numpy() if torch.is_tensor(action) else np.asarray(action)
+        if value.ndim != 2:
+            raise ValueError(f"Expected action shape (T,A), got {value.shape}")
+        if self.process is not None and action_key in self.process:
+            value = self.process[action_key].transform(value)
+        action = torch.from_numpy(np.asarray(value, dtype=np.float32)).unsqueeze(0).to(self.device)
+        return torch.nan_to_num(action, 0.0)
 
     def _prepare_pixels(
         self,
@@ -1709,24 +1682,24 @@ class ProbingEvaluator:
                     is_val=False,
                 )
                 
-                current_z = rollout_data["current_z"]  # [z0, ..., z_{N-1}]
-                true_z = rollout_data["true_z"]        # [z0, z1, ..., z_N]
-                pred_z = rollout_data["pred_z"]        # [z0, zhat1, ..., zhat_N]
+                current_z = rollout_data["current_z"]  # last context latent in each window
+                true_z = rollout_data["true_z"]        # next latent in each window
+                pred_z = rollout_data["pred_z"]        # predicted next latent in each window
 
                 assert true_z.shape == pred_z.shape
-                assert true_z.shape[0] == current_z.shape[0] + 1
+                assert true_z.shape == current_z.shape
 
                 pred_true_mse = np.mean(
-                    (pred_z[1:] - true_z[1:]) ** 2,
+                    (pred_z - true_z) ** 2,
                     axis=1,
                 )
 
                 pred_current_mse = np.mean(
-                    (pred_z[1:] - current_z) ** 2,
+                    (pred_z - current_z) ** 2,
                     axis=1,
                 )
                 copy_baseline = np.mean(
-                    (current_z - true_z[1:]) ** 2,
+                    (current_z - true_z) ** 2,
                     axis=1,
                 )
 
@@ -1854,24 +1827,24 @@ class ProbingEvaluator:
                     is_val=True,
                 )
                 
-                current_z = rollout_data["current_z"]  # [z0, ..., z_{N-1}]
-                true_z = rollout_data["true_z"]        # [z0, z1, ..., z_N]
-                pred_z = rollout_data["pred_z"]        # [z0, zhat1, ..., zhat_N]
+                current_z = rollout_data["current_z"]  # last context latent in each window
+                true_z = rollout_data["true_z"]        # next latent in each window
+                pred_z = rollout_data["pred_z"]        # predicted next latent in each window
 
                 assert true_z.shape == pred_z.shape
-                assert true_z.shape[0] == current_z.shape[0] + 1
+                assert true_z.shape == current_z.shape
 
                 pred_true_mse = np.mean(
-                    (pred_z[1:] - true_z[1:]) ** 2,
+                    (pred_z - true_z) ** 2,
                     axis=1,
                 )
 
                 pred_current_mse = np.mean(
-                    (pred_z[1:] - current_z) ** 2,
+                    (pred_z - current_z) ** 2,
                     axis=1,
                 )
                 copy_baseline = np.mean(
-                    (current_z - true_z[1:]) ** 2,
+                    (current_z - true_z) ** 2,
                     axis=1,
                 )
 

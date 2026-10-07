@@ -18,7 +18,7 @@ def plot_one_step_rollout_pca(
     draw_connections=False,
 ):
     """
-    Encoder(o_{t+1}) と Predictor(Encoder(o_t), a_t) を
+    各windowのtrue next latentとhistoryからのone-step predictionを
     Encoder側でfitした同一PCA空間に可視化する。
 
     Args:
@@ -43,13 +43,9 @@ def plot_one_step_rollout_pca(
             f"pred_z must be (N,D), got {pred_z.shape}"
         )
 
-    length = min(
-        true_z.shape[0],
-        pred_z.shape[0],
-    )
-
-    true_z = true_z[:length]
-    pred_z = pred_z[:length]
+    if true_z.shape != pred_z.shape:
+        raise ValueError(f"Aligned true/pred shapes must match: {true_z.shape} != {pred_z.shape}")
+    length = true_z.shape[0]
 
     if length < 3:
         raise ValueError(
