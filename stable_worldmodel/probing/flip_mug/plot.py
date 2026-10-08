@@ -5,6 +5,47 @@ from sklearn.decomposition import PCA
 import json
 
 
+def _plot_time_colored_trajectory_3d(
+    ax,
+    xyz,
+    cmap_name="Blues",
+    cmap_start=0.50,
+    cmap_end=1.00,
+    linewidth=2.0,
+    alpha=1.0,
+    label=None,
+    **kwargs,
+):
+    xyz = np.asarray(xyz)
+    if xyz.ndim != 2 or xyz.shape[1] != 3:
+        raise ValueError(f"xyz must have shape (N, 3), got {xyz.shape}")
+
+    n_segments = len(xyz) - 1
+    if n_segments < 1:
+        return
+
+    cmap = plt.get_cmap(cmap_name)
+    # Map endpoint times to the requested range and color each segment
+    # by its midpoint time.
+    color_values = (
+        cmap_start
+        + (cmap_end - cmap_start)
+        * (np.arange(n_segments) + 0.5)
+        / n_segments
+    )
+    for i in range(n_segments):
+        ax.plot(
+            xyz[i:i+2, 0],
+            xyz[i:i+2, 1],
+            xyz[i:i+2, 2],
+            color=cmap(color_values[i]),
+            linewidth=linewidth,
+            alpha=alpha,
+            label=label if i == 0 else None,
+            **kwargs,
+        )
+
+
 
 
 
@@ -68,11 +109,9 @@ def plot_one_step_rollout_pca(
     ax = fig.add_subplot(111, projection="3d")
 
     # 真のencoder表現の軌跡
-    ax.plot(
-        true_pca[:, 0],
-        true_pca[:, 1],
-        true_pca[:, 2],
-        color="black",
+    _plot_time_colored_trajectory_3d(
+        ax,
+        true_pca,
         linewidth=2.0,
         # marker="o",
         markersize=3,
@@ -242,11 +281,9 @@ def plot_closed_loop_rollout_pca(
     fig = plt.figure(figsize=(10, 9))
     ax = fig.add_subplot(111, projection="3d")
 
-    ax.plot(
-        true_pca[:, 0],
-        true_pca[:, 1],
-        true_pca[:, 2],
-        color="black",
+    _plot_time_colored_trajectory_3d(
+        ax,
+        true_pca,
         linewidth=2.5,
         label="Encoder",
     )
@@ -470,11 +507,9 @@ def plot_episode_closed_rollout_whiskers_pca(
     # -------------------------------------------------
     # episode全体の真の軌跡 = 幹
     # -------------------------------------------------
-    ax.plot(
-        episode_true_pca[:, 0],
-        episode_true_pca[:, 1],
-        episode_true_pca[:, 2],
-        color="black",
+    _plot_time_colored_trajectory_3d(
+        ax,
+        episode_true_pca,
         linewidth=2.5,
         alpha=0.9,
         label="Encoder episode trajectory",
