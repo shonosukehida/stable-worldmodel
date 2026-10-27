@@ -543,6 +543,18 @@ class DiffusionPolicy(BasePolicy):
 
         return action
 
+    def get_action_chunk(self, info_dict: dict, **kwargs) -> np.ndarray:
+        """Return physical actions with shape (B, action_horizon, action_dim)."""
+        with torch.no_grad():
+            action = self.predict_action(info_dict)["action"].detach().cpu().numpy()
+        shape = action.shape
+        action = action.reshape(-1, shape[-1])
+        for key in ("action_cartesian", "action", "action_joint"):
+            if key in self.process:
+                action = self.process[key].inverse_transform(action)
+                break
+        return action.reshape(shape)
+
     def sample_action_sequences(
         self,
         info_dict: dict,
@@ -950,13 +962,13 @@ class GPCPolicy(BasePolicy):
 
 
     @torch.no_grad()
-    def get_action(
+    def get_action_chunk(
         self,
         info_dict: dict,
         **kwargs,
     ) -> np.ndarray:
         """
-        Select an action with GPC-RANK.
+        Select a physical action chunk (B, Ta, action_dim) with GPC-RANK.
 
         info_dict:
             LeWM用の観測。
@@ -1080,8 +1092,7 @@ class GPCPolicy(BasePolicy):
             best_idx,
         ]
 
-        # Execute first action only
-        action = best_sequence[:, 0]
+        action = best_sequence
 
         return (
             action
@@ -1090,6 +1101,10 @@ class GPCPolicy(BasePolicy):
             .numpy()
         )
 
+
+    def get_action(self, info_dict: dict, **kwargs) -> np.ndarray:
+        """Preserve the single-action API."""
+        return self.get_action_chunk(info_dict, **kwargs)[:, 0]
 
     def encode_goal(
         self,
