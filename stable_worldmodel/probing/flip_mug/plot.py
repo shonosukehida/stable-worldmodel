@@ -683,3 +683,67 @@ def plot_episode_closed_rollout_whiskers_pca(
         "true_rollouts_pca": true_rollouts_pca,
         "explained_variance_ratio": explained,
     }
+
+
+def plot_train_val_one_step_shared_pca(train_data, val_data, save_path):
+    """Fit PCA on train encoder targets only; project train/val true and pred."""
+    train_true = np.asarray(train_data["true_z"])
+    train_pred = np.asarray(train_data["pred_z"])
+    val_true = np.asarray(val_data["true_z"])
+    val_pred = np.asarray(val_data["pred_z"])
+    if train_true.ndim != 2 or len(train_true) < 3:
+        raise ValueError("Need at least three train encoder latents for 3D PCA")
+    if train_true.shape != train_pred.shape or val_true.shape != val_pred.shape:
+        raise ValueError("Encoder and predictor arrays must be aligned")
+    if val_true.ndim != 2 or train_true.shape[1] != val_true.shape[1]:
+        raise ValueError("Train and val feature dimensions must match")
+
+    pca = PCA(n_components=3).fit(train_true)
+    projected = {
+        "train_true": pca.transform(train_true),
+        "train_pred": pca.transform(train_pred),
+        "val_true": pca.transform(val_true),
+        "val_pred": pca.transform(val_pred),
+    }
+    fig = plt.figure(figsize=(11, 9))
+    ax = fig.add_subplot(111, projection="3d")
+    for key, color, style, label in (
+        ("train_true", "tab:blue", "-", "Train Encoder"),
+        ("train_pred", "tab:blue", "--", "Train Predictor"),
+        ("val_true", "tab:orange", "-", "Val Encoder"),
+        ("val_pred", "tab:orange", "--", "Val Predictor"),
+    ):
+        xyz = projected[key]
+        ax.plot(xyz[:, 0], xyz[:, 1], xyz[:, 2],
+                color=color, linestyle=style, linewidth=1.8, label=label)
+        ax.scatter(*xyz[0], color=color, marker="o", s=35)
+
+    ax.set_title("Flip Mug One-step Dynamics | Shared Train PCA\n"
+                 "variance on train: "
+                 + ", ".join(f"{v:.3f}" for v in pca.explained_variance_ratio_))
+    ax.set_xlabel("Train PC1")
+    ax.set_ylabel("Train PC2")
+    ax.set_zlabel("Train PC3")
+    # Equal physical scale on all PCA axes to avoid visual scale distortion.
+    stacked = np.concatenate(list(projected.values()), axis=0)
+    mins, maxs = stacked.min(axis=0), stacked.max(axis=0)
+    center = (mins + maxs) / 2
+    radius = max(float((maxs - mins).max()) / 2, 1e-6)
+    ax.set_xlim(center[0] - radius, center[0] + radius)
+    ax.set_ylim(center[1] - radius, center[1] + radius)
+    ax.set_zlim(center[2] - radius, center[2] + radius)
+    ax.set_box_aspect((1, 1, 1))
+    ax.legend()
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    np.savez_compressed(
+        save_path.with_suffix(".npz"),
+        **projected,
+        pca_mean=pca.mean_,
+        pca_components=pca.components_,
+        explained_variance_ratio=pca.explained_variance_ratio_,
+    )
+    return projected
