@@ -1670,6 +1670,31 @@ class ProbingEvaluator:
             exist_ok=True,
         )
         
+        # Independent opt-in comparison; do not change existing plotting switches.
+        if self.config.get("plot_train_dyn_vs_val_dyn", False):
+            if self.val_dataset is None:
+                raise ValueError("plot_train_dyn_vs_val_dyn requires val_dataset")
+            print("Shared-PCA train versus validation one-step dynamics")
+            train_dyn = self.collect_one_step_rollout_latents(
+                start_idx=0,
+                max_horizon=self.plot_max_horizon,
+                pixel_key="pixels",
+                action_key=self.action_key,
+                is_val=False,
+            )
+            val_dyn = self.collect_one_step_rollout_latents(
+                start_idx=0,
+                max_horizon=self.plot_max_horizon,
+                pixel_key="pixels",
+                action_key=self.action_key,
+                is_val=True,
+            )
+            plot_train_val_one_step_shared_pca(
+                train_dyn,
+                val_dyn,
+                save_path=save_dir / "train_vs_val_one_step_shared_pca.png",
+            )
+
         if self.config.plot_all_train_data:
             if self.config.plot_open_data:
                 
