@@ -867,19 +867,27 @@ class GPCPolicy(BasePolicy):
 
     def __init__(
         self,
-        diffusion_policy: DiffusionPolicy,
-        world_model,
-        reward_fn,
+        diffusion_policy: DiffusionPolicy = None,
+        world_model=None,
+        reward_fn=None,
         num_candidates: int = 50,
         action_horizon: int | None = None,
         process = None,
         transform = None,
+        action_policy=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
 
         self.type = "gpc"
 
+        if action_policy is not None:
+            if diffusion_policy is not None:
+                raise ValueError("Specify only one of action_policy and diffusion_policy")
+            diffusion_policy = action_policy
+        if diffusion_policy is None:
+            raise ValueError("GPC requires a candidate action policy")
+        self.action_policy = diffusion_policy
         self.diffusion_policy = diffusion_policy
         self.world_model = world_model
 

@@ -707,16 +707,45 @@ def plot_train_val_one_step_shared_pca(train_data, val_data, save_path):
     }
     fig = plt.figure(figsize=(11, 9))
     ax = fig.add_subplot(111, projection="3d")
-    for key, color, style, label in (
-        ("train_true", "tab:blue", "-", "Train Encoder"),
-        ("train_pred", "tab:blue", "--", "Train Predictor"),
-        ("val_true", "tab:orange", "-", "Val Encoder"),
-        ("val_pred", "tab:orange", "--", "Val Predictor"),
-    ):
+
+    styles = (
+        ("train_true", "#60A5FA", 2.8, 1.0, "Train Encoder"),
+        ("train_pred", "#1D4ED8", 1.8, 0.85, "Train Predictor"),
+        ("val_true", "#FB923C", 2.8, 1.0, "Val Encoder"),
+        ("val_pred", "#C2410C", 1.8, 0.85, "Val Predictor"),
+    )
+
+    for key, color, linewidth, alpha, label in styles:
         xyz = projected[key]
-        ax.plot(xyz[:, 0], xyz[:, 1], xyz[:, 2],
-                color=color, linestyle=style, linewidth=1.8, label=label)
-        ax.scatter(*xyz[0], color=color, marker="o", s=35)
+
+        ax.plot(
+            xyz[:, 0],
+            xyz[:, 1],
+            xyz[:, 2],
+            color=color,
+            linestyle="-",
+            linewidth=linewidth,
+            alpha=alpha,
+            label=label,
+        )
+
+        # 開始点
+        ax.scatter(
+            *xyz[0],
+            color=color,
+            marker="o",
+            s=60,
+        )
+
+        # 終了点
+        ax.scatter(
+            *xyz[-1],
+            color=color,
+            marker="s",
+            s=60,
+        )
+
+
 
     ax.set_title("Flip Mug One-step Dynamics | Shared Train PCA\n"
                  "variance on train: "
