@@ -940,7 +940,7 @@ class GPCPolicy(BasePolicy):
 
             if value.shape[0] != B: continue
 
-            wm_info[key] = (value[:, None].expand(B, K, *value.shape[1:],))
+            wm_info[key] = value[:, None].expand(B, K, *value.shape[1:])
 
 
         device = next(self.world_model.parameters()).device
