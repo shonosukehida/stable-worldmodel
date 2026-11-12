@@ -34,6 +34,7 @@ dependencies = [
 swm = "stable_worldmodel.cli:app"
 
 [project.optional-dependencies]
+imle = ["torch-ema==0.3", "omegaconf>=2.3.0"]
 train = [
     "transformers>=4.50.0",
     "stable-pretraining",
