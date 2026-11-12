@@ -32,6 +32,7 @@ class ActionGenerator(nn.Module):
         kernel_size=5,
         heads=8,
         separate_gripper=True,
+        use_proprio=False,
     ):
         super().__init__()
         if pred_horizon % (2 ** (len(channels) - 1)):
@@ -47,15 +48,17 @@ class ActionGenerator(nn.Module):
         self.gen_dim = action_dim - int(separate_gripper)
         self.pred_horizon = pred_horizon
         self.separate_gripper = separate_gripper
-        # Two cameras are separate conditioning tokens; the reference uses image/state tokens.
+        condition_width = 2 * feature_dim + 8 if use_proprio else feature_dim
+        condition_steps = obs_horizon if use_proprio else 2 * obs_horizon
+        # Preserve historical camera tokens; state mode concatenates both views per step.
         self.policy = ConditionalUnet1d(
-            feature_dim * obs_horizon * 2,
+            condition_width * condition_steps,
             (self.gen_dim, pred_horizon),
             unet_config(channels, kernel_size, True, heads, True),
         )
         if separate_gripper:
             self.gripper_head = ConditionalUnet1d(
-                feature_dim,
+                condition_width,
                 (self.gen_dim, pred_horizon),
                 unet_config(gripper_channels, 3, False, None, False),
             )

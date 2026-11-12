@@ -29,6 +29,8 @@ class IMLEPolicy(DiffusionPolicy):
         gripper_loss_weight=0.003125,
         process=None,
         transform=None,
+        use_proprio=False,
+        proprio_stats=None,
         **kwargs,
     ):
         BasePolicy.__init__(self, **kwargs)
@@ -42,6 +44,11 @@ class IMLEPolicy(DiffusionPolicy):
             )
         if n_samples_per_condition < 1 or noise_scale <= 0 or epsilon < 0:
             raise ValueError('Invalid IMLE sampling parameters')
+        from .proprio import validate_proprio_stats
+        if not isinstance(use_proprio, bool):
+            raise ValueError('IMLE use_proprio must be boolean')
+        self.use_proprio = use_proprio
+        self.proprio_stats = validate_proprio_stats(proprio_stats) if use_proprio else None
         self.type = 'imle'
         self.model, self.obs_encoder = model, obs_encoder
         self.wrist_obs_encoder = wrist_obs_encoder
@@ -55,12 +62,18 @@ class IMLEPolicy(DiffusionPolicy):
         self.num_inference_steps = 1
         self.process, self.transform = process or {}, transform or {}
 
-    def _condition(self, pixels, wrist_pixels):
+    def _condition(self, pixels, wrist_pixels, proprio=None):
         if pixels.shape[1] < self.obs_horizon or wrist_pixels is None:
             raise ValueError(
                 'IMLE requires complete overhead and wrist observation histories'
             )
         flat, batch, steps = self._encode_observation(pixels, wrist_pixels)
+        if self.use_proprio:
+            from .proprio import normalize_proprio
+            if proprio is None or tuple(proprio.shape) != (batch, steps, 8):
+                raise ValueError('IMLE proprio requires shape (B, obs_horizon, 8)')
+            state = normalize_proprio(proprio, self.proprio_stats, device=self.device, dtype=self.dtype)
+            return torch.cat([flat.reshape(batch, steps, -1), state], dim=-1)
         return flat.reshape(batch, steps * 2, -1)
 
     def _noise(self, batch):
@@ -77,7 +90,7 @@ class IMLEPolicy(DiffusionPolicy):
 
     def predict_action(self, info_dict):
         info = self._prepare_info(dict(info_dict))
-        cond = self._condition(info['pixels'], info.get('wrist_pixels'))
+        cond = self._condition(info['pixels'], info.get('wrist_pixels'), info.get('proprio'))
         trajectory = self.model(cond, self._noise(cond.shape[0]))
         start = self.obs_horizon - 1
         return {
@@ -96,7 +109,7 @@ class IMLEPolicy(DiffusionPolicy):
         ):
             raise ValueError('num_samples must be a positive integer')
         info = self._prepare_info(dict(info_dict))
-        cond = self._condition(info['pixels'], info.get('wrist_pixels'))
+        cond = self._condition(info['pixels'], info.get('wrist_pixels'), info.get('proprio'))
         batch = cond.shape[0]
         repeated = cond.repeat_interleave(num_samples, dim=0)
         result = self.model(
@@ -124,7 +137,7 @@ class IMLEPolicy(DiffusionPolicy):
         return result
 
     def compute_loss(self, batch):
-        cond = self._condition(batch['pixels'], batch.get('wrist_pixels'))
+        cond = self._condition(batch['pixels'], batch.get('wrist_pixels'), batch.get('proprio'))
         action = batch['action'].to(device=self.device, dtype=self.dtype)
         if action.shape != (cond.shape[0], self.pred_horizon, self.action_dim):
             raise ValueError(
