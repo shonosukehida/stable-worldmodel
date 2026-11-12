@@ -20,3 +20,17 @@ IMLEテスト、合成学習checkpoint、実JEPAとの接続、学習済みDP互
 詳細・変更ファイル一覧・再実行方法は、同時に統合するLeWorldModelの
 `docs/IMLE_INTEGRATION_REPORT.md` を参照。
 ローカルログ：`/home/hida/workspace/imle-integration/validation/`。
+
+## 実資産/CUDA追加検証（2026-11-12）
+
+推論実装の変更なし。実学習済みIMLEはこのサーバに存在しないとユーザー確認済み。
+診断用の未学習IMLEと、履歴上の最新指定
+`flip_mug/ep100_tm300_multiview_play_normal_brightness/lewm_object.ckpt`
+を使い、CPUとRTX 4080で20候補・保存観測16フレームのオフライン推論に成功した。
+IMLE単体・実JEPAでの候補評価・argmax選択・描画保存を確認。
+47アプリケーションモジュールのimport先とSHA256を検査し、両方の統合worktree配下と確認。
+実機・カメラ関連importは禁止し、接続していない。
+同じseedでもCPU/CUDAのノイズ列と選択は異なる。同一物理候補では今回の最適indexは一致したが、
+候補・報酬のbitwise一致はしない。許容誤差の緩和は行っていない。
+実学習済みIMLE、運用WM aliasの確定、既存失敗群が残るためマージ保留を継続する。
+詳細・検証専用ランナー：LeWorldModelの `docs/IMLE_OFFLINE_FOLLOWUP.md`。
