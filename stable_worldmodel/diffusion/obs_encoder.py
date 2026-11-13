@@ -98,6 +98,9 @@ def resolve_obs_encoder_config(config=None):
         return encoder_type, {"pretrained": config.get("pretrained", False)}
     if encoder_type == "conv":
         return encoder_type, {"feature_dim": config.get("feature_dim", 512)}
+    if encoder_type == "jepa":
+        return encoder_type, {key: config.get(key) for key in
+                              ("checkpoint", "world_config", "process_stats")}
     raise ValueError(f"Unknown encoder_type: {encoder_type!r}")
 
 

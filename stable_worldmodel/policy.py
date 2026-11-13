@@ -461,13 +461,7 @@ class DiffusionPolicy(BasePolicy):
                 "'pixels' must be provided for DiffusionPolicy"
             )
 
-        global_cond, B, To = self._encode_observation(
-            pixels=info_dict["pixels"],
-            wrist_pixels=info_dict.get(
-                "wrist_pixels",
-                None,
-            ),
-        )
+        global_cond, B, To = self._encode_observation_info(info_dict)
 
 
         # --------------------------------------------------
@@ -579,13 +573,7 @@ class DiffusionPolicy(BasePolicy):
                 "'pixels' must be provided for DiffusionPolicy"
             )
 
-        global_cond, B, To = self._encode_observation(
-            pixels=info_dict["pixels"],
-            wrist_pixels=info_dict.get(
-                "wrist_pixels",
-                None,
-            ),
-        )
+        global_cond, B, To = self._encode_observation_info(info_dict)
 
         global_cond = (
             global_cond[:, None, :]
@@ -675,13 +663,7 @@ class DiffusionPolicy(BasePolicy):
             dtype=self.dtype,
         )
 
-        global_cond, B, To = self._encode_observation(
-            pixels=batch["pixels"],
-            wrist_pixels=batch.get(
-                "wrist_pixels",
-                None,
-            ),
-        )
+        global_cond, B, To = self._encode_observation_info(batch)
 
         # --------------------------------------------------
         # Sample diffusion noise
@@ -738,6 +720,10 @@ class DiffusionPolicy(BasePolicy):
 
         return loss
 
+
+    def _encode_observation_info(self, info):
+        """Observation hook; the legacy image encoding path is unchanged."""
+        return self._encode_observation(pixels=info["pixels"], wrist_pixels=info.get("wrist_pixels"))
 
     def _encode_observation(
         self,
