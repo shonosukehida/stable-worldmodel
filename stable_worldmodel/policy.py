@@ -860,7 +860,7 @@ class GPCPolicy(BasePolicy):
     1. DiffusionPolicy generates K candidate action sequences.
     2. World Model rolls out each candidate.
     3. reward_fn evaluates the predicted trajectories.
-    4. The highest-reward candidate is selected.
+    4. Select the highest-reward candidate, or candidate 0 for latency ablation.
 
     GPC-OPT is not implemented here.
     """
@@ -875,6 +875,7 @@ class GPCPolicy(BasePolicy):
         process = None,
         transform = None,
         action_policy=None,
+        execute_first_candidate: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -898,6 +899,9 @@ class GPCPolicy(BasePolicy):
         self.reward_fn = reward_fn
 
         self.num_candidates = num_candidates
+        self.execute_first_candidate = execute_first_candidate
+        self.best_idx = None
+        self.selected_candidate_index = None
 
         if action_horizon is None:
             action_horizon = diffusion_policy.action_horizon
@@ -1090,6 +1094,13 @@ class GPCPolicy(BasePolicy):
             dim=1,
         )
 
+        selected_candidate_index = (
+            torch.zeros_like(best_idx) if self.execute_first_candidate else best_idx
+        )
+        # Keep evaluation and execution indices separate without a CUDA host sync.
+        self.best_idx = best_idx.detach().clone()
+        self.selected_candidate_index = selected_candidate_index.detach().clone()
+
         batch_idx = torch.arange(
             B,
             device=best_idx.device,
@@ -1097,7 +1108,7 @@ class GPCPolicy(BasePolicy):
 
         best_sequence = candidate_actions[
             batch_idx,
-            best_idx,
+            selected_candidate_index,
         ]
 
         action = best_sequence
