@@ -67,5 +67,61 @@ class RewardTests(unittest.TestCase):
         self.assertEqual(LatentGoalReward(model(), 2).lambda_prop, 2)
 
 
+class MultiviewRewardTests(unittest.TestCase):
+    def test_all_ones_exact_for_known_models(self):
+        for dims in ((192, 192, 32), (3, 5, 2)):
+            for dtype in (torch.float32, torch.float64, torch.bfloat16):
+                output = dict(predicted_emb=torch.randn(2, 4, 3, sum(dims)).to(dtype),
+                              goal_emb=torch.randn(2, 2, sum(dims)).to(dtype))
+                reward = LatentGoalReward(model(*dims), lambda_overhead=1., lambda_wrist=1., lambda_prop=1.)
+                self.assertTrue(torch.equal(reward(output, {}), latent_goal_reward(output, {})))
+
+    def test_independent_weights_change_selection_and_use_terminal_only(self):
+        # Three candidates each miss exactly one modality, with unequal dimensions.
+        wm = model(3, 5, 2)
+        pred = torch.zeros(2, 3, 2, 10)
+        pred[:, :, 0] = 100  # Nonterminal predictions must not affect scoring.
+        pred[:, 0, -1, 0] = 1
+        pred[:, 1, -1, 3] = 2
+        pred[:, 2, -1, 8] = 3
+        goal = torch.zeros(2, 2, 10)
+        goal[:, 0] = 100
+        output = dict(predicted_emb=pred, goal_emb=goal)
+        for weights, expected, index in (
+            ((1., 1., 1.), [-1., -4., -9.], 0),
+            ((10., 1., 1.), [-10., -4., -9.], 1),
+            ((1., 0., 1.), [-1., 0., -9.], 1),
+            ((1., 1., 0.), [-1., -4., 0.], 2),
+            ((0., 0., 0.), [0., 0., 0.], 0),
+        ):
+            reward = LatentGoalReward(wm, lambda_overhead=weights[0],
+                                      lambda_wrist=weights[1], lambda_prop=weights[2])
+            actual = reward(output, {})
+            self.assertTrue(torch.equal(actual, torch.tensor([expected, expected])))
+            self.assertTrue(torch.equal(actual.argmax(1), torch.tensor([index, index])))
+
+    def test_legacy_prop_only_exact(self):
+        output = dict(predicted_emb=torch.randn(2, 7, 3, 416), goal_emb=torch.randn(2, 2, 416))
+        squared = (output['predicted_emb'][:, :, -1] - output['goal_emb'][:, -1, None]) ** 2
+        for prop in (0., .5, 2.):
+            expected = -(squared[..., :384].sum(-1) + prop * squared[..., 384:].sum(-1))
+            self.assertTrue(torch.equal(LatentGoalReward(model(), prop)(output, {}), expected))
+
+    def test_invalid_all_weights_and_structure(self):
+        for name in ('lambda_overhead', 'lambda_wrist', 'lambda_prop'):
+            for value in (float('nan'), float('inf'), -float('inf'), -.1, True, '0.5', None):
+                with self.subTest(name=name, value=value), self.assertRaisesRegex(ValueError, name):
+                    LatentGoalReward(model(), **{name: value})
+                with self.assertRaisesRegex(ValueError, name):
+                    latent_goal_reward({}, {}, **{name: value})
+            self.assertEqual(getattr(LatentGoalReward(model(), **{name: 2}), name), 2.)
+        for name in ('lambda_overhead', 'lambda_wrist'):
+            with self.assertRaisesRegex(ValueError, 'boundary'):
+                LatentGoalReward(object(), **{name: 0.})
+            reward = LatentGoalReward(model(3, 5, 2), **{name: .5})
+            with self.assertRaisesRegex(ValueError, 'dimension'):
+                reward(dict(predicted_emb=torch.zeros(1, 2, 1, 11), goal_emb=torch.zeros(1, 1, 11)), {})
+
+
 if __name__ == '__main__':
     unittest.main()
