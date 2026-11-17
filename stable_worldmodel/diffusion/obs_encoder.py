@@ -3,6 +3,28 @@ import torch.nn as nn
 from torchvision.models import resnet18
 
 
+def _validate_pooling(pooling):
+    if pooling not in ("gap", "spatial_softmax"):
+        raise ValueError(f"Unknown pooling: {pooling!r}; expected 'gap' or 'spatial_softmax'")
+
+
+class SpatialSoftmax(nn.Module):
+    """Expected (x, y) per channel on a [-1, 1] grid, at temperature 1."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 4:
+            raise ValueError(f"Expected feature map (B, C, H, W), got {x.shape}")
+        batch, channels, height, width = x.shape
+        probabilities = x.flatten(2).softmax(dim=-1)
+        # A singleton axis represents the center of the image.
+        xs = torch.linspace(-1, 1, width, device=x.device, dtype=x.dtype) if width > 1 else x.new_zeros(1)
+        ys = torch.linspace(-1, 1, height, device=x.device, dtype=x.dtype) if height > 1 else x.new_zeros(1)
+        grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
+        expected_x = (probabilities * grid_x.flatten()).sum(dim=-1)
+        expected_y = (probabilities * grid_y.flatten()).sum(dim=-1)
+        return torch.stack((expected_x, expected_y), dim=-1).reshape(batch, 2 * channels)
+
+
 class ResNet18ObsEncoder(nn.Module):
     """
     Encode one RGB observation into a feature vector.
@@ -17,8 +39,10 @@ class ResNet18ObsEncoder(nn.Module):
     def __init__(
         self,
         pretrained: bool = False,
+        pooling: str = "gap",
     ):
         super().__init__()
+        _validate_pooling(pooling)
 
         if pretrained:
             from torchvision.models import (
@@ -41,6 +65,9 @@ class ResNet18ObsEncoder(nn.Module):
 
         # Remove classification layer
         backbone.fc = nn.Identity()
+        if pooling == "spatial_softmax":
+            backbone.avgpool = SpatialSoftmax()
+            backbone.fc = nn.Linear(2 * self.feature_dim, self.feature_dim)
 
         self.backbone = backbone
 
@@ -64,8 +91,9 @@ class ResNet18ObsEncoder(nn.Module):
 class ConvObsEncoder(nn.Module):
     """Small RGB CNN with adaptive pooling and a configurable feature projection."""
 
-    def __init__(self, feature_dim: int = 512):
+    def __init__(self, feature_dim: int = 512, pooling: str = "gap"):
         super().__init__()
+        _validate_pooling(pooling)
         if not isinstance(feature_dim, int) or isinstance(feature_dim, bool) or feature_dim <= 0:
             raise ValueError("feature_dim must be a positive integer")
         self.feature_dim = feature_dim
@@ -76,9 +104,9 @@ class ConvObsEncoder(nn.Module):
             nn.ReLU(),
             nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
-            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.AdaptiveAvgPool2d((1, 1)) if pooling == "gap" else SpatialSoftmax(),
             nn.Flatten(),
-            nn.Linear(128, feature_dim),
+            nn.Linear(128 if pooling == "gap" else 256, feature_dim),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -93,11 +121,14 @@ class ConvObsEncoder(nn.Module):
 def resolve_obs_encoder_config(config=None):
     """Normalize training settings; missing type retains historical ResNet18."""
     config = dict(config or {})
+    pooling = config.get("pooling", "gap")
+    _validate_pooling(pooling)
+    pooling_config = {"pooling": pooling} if pooling == "spatial_softmax" else {}
     encoder_type = config.get("type", "resnet18")
     if encoder_type == "resnet18":
-        return encoder_type, {"pretrained": config.get("pretrained", False)}
+        return encoder_type, {"pretrained": config.get("pretrained", False), **pooling_config}
     if encoder_type == "conv":
-        return encoder_type, {"feature_dim": config.get("feature_dim", 512)}
+        return encoder_type, {"feature_dim": config.get("feature_dim", 512), **pooling_config}
     raise ValueError(f"Unknown encoder_type: {encoder_type!r}")
 
 
@@ -108,7 +139,10 @@ def create_obs_encoder(encoder_type="resnet18", encoder_config=None, *, load_wei
     """
     config = dict(encoder_config or {})
     if encoder_type == "resnet18":
-        return ResNet18ObsEncoder(pretrained=False if load_weights else config.get("pretrained", False))
+        return ResNet18ObsEncoder(
+            pretrained=False if load_weights else config.get("pretrained", False),
+            pooling=config.get("pooling", "gap"),
+        )
     if encoder_type == "conv":
         return ConvObsEncoder(**config)
     raise ValueError(f"Unknown encoder_type: {encoder_type!r}")
