@@ -1,4 +1,4 @@
-# Frozen JEPA Diffusion Policy
+# JEPA Diffusion Policy
 
 `stable_worldmodel.diffusion.jepa` provides `FrozenJEPAEncoder` and
 `JEPADiffusionPolicy`. The latter extends only the observation-dictionary hook;
@@ -8,8 +8,12 @@ sampling use the existing `DiffusionPolicy` implementation.
 The encoder runs the loaded world's `encode()` method on preprocessed overhead
 and wrist images plus raw proprio. It normalizes proprio using saved world-model
 training statistics and returns the concatenated overhead/projector,
-wrist/projector, and proprio latents. All feature parameters are frozen, forward
-uses no_grad, and train() always retains eval mode, including BatchNorm buffers.
+wrist/projector, and proprio latents. The default `frozen` mode keeps the
+encoder in evaluation mode and disables gradients. In `partial` mode each
+camera trains its last N ViT blocks. In `full` mode both camera feature
+extractors, both projectors and the proprio encoder train together. Frozen
+modules keep their evaluation behavior, including BatchNorm statistics.
+Validation and inference use evaluation mode for the whole encoder.
 `EmptyWristEncoder` is a zero-dimensional compatibility handle: wrist features
 are already part of the combined encoder.
 
