@@ -1,0 +1,55 @@
+{
+  "upstream": "https://github.com/eloialonso/diamond",
+  "commit": "5bcd1599755b4f2fae8e5e079e02f0728e174965",
+  "sources": {
+    "LICENSE": {
+      "git_blob": "4dabe85556f852094708ce8b7f60bcdd9407e5f0",
+      "sha256": "dd560e2f73fe349c9b3ddcf74dd9e8757e414619a72ae07d06dfac4a0289c8f9"
+    },
+    "config/agent/default.yaml": {
+      "git_blob": "b04097852aefc9aea870746f6d13ff2193d3bdf0",
+      "sha256": "eb6fffa3b6a5e016f8976b3c2452b0e7366274370107c3eff802e3dae2fdfd6a"
+    },
+    "config/trainer.yaml": {
+      "git_blob": "1f9fe306d01a3393dd62e3e6b76c6a29be3de005",
+      "sha256": "020f4a168732700e50fb1dcee2e8c0ace2b6bd2ba52931d53d010ac86644c880"
+    },
+    "src/models/blocks.py": {
+      "git_blob": "410ad69363fb349c1f5e56cfd111f9e49cdc605b",
+      "sha256": "04a67cca0df434286b96c9923ffd08f2017ff9f1babdfda250e6fd90676863f8"
+    },
+    "src/models/diffusion/denoiser.py": {
+      "git_blob": "8f07bdd99452d2f3409f3eb63b5738a202a5001b",
+      "sha256": "6dc645ec0789575a9cdf57a8f0156418974f2831b9ed1eb35a4249536b26b0dd"
+    },
+    "src/models/diffusion/diffusion_sampler.py": {
+      "git_blob": "36f6d61cec810a9de618e8ee0c3671e4b6f3ae1c",
+      "sha256": "526921bebadcc7b7d349f0f80f0b64cf0cd05ae0033105a5c84ce80bcc84418d"
+    },
+    "src/models/diffusion/inner_model.py": {
+      "git_blob": "91507c6f842fe74a1482c9a0253b3dbd3ccc9ca3",
+      "sha256": "524e99e1acfeccfad18dd2d82830ac679fcf8d2f070e680cbdbbb214a1d539cd"
+    },
+    "src/utils.py": {
+      "git_blob": "0bdacaa9ae922efb6a5acc5b94b8051d92c4c397",
+      "sha256": "45e1f99149dddacddc69e14d665005d9ee8fe1fea469b0b02e2367208cf344f2"
+    }
+  },
+  "patches": [
+    "Relative annotation imports in denoiser.",
+    "Sampler accepts a device-local generator for initial/churn noise.",
+    "configure_opt and get_lr_sched extracted verbatim from src/utils.py.",
+    "Robot adapter replaces act_emb only with shared biasless 8-to-64 linear + flatten.",
+    "Robot views configure img_channels=3 or 6 in the original input and output convolutions."
+  ],
+  "runtime_sha256": {
+    "upstream/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "upstream/blocks.py": "04a67cca0df434286b96c9923ffd08f2017ff9f1babdfda250e6fd90676863f8",
+    "upstream/diffusion/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "upstream/diffusion/denoiser.py": "de1207691e68fba07e8ae53c616baa2acf7e46a2532d736feb7bc378cd1842dc",
+    "upstream/diffusion/diffusion_sampler.py": "71407c4ff8aa26b4ad8434c9c0f1b4aee527a8cf4bd313e4b2d2e91a771ad668",
+    "upstream/diffusion/inner_model.py": "524e99e1acfeccfad18dd2d82830ac679fcf8d2f070e680cbdbbb214a1d539cd",
+    "upstream/optim.py": "7f246e9505dcb7c586bd0094e56ad5ad81d699a9cc252d44bd252863ca578db3",
+    "upstream/types.py": "4be19cb44acbaf0f9696c73a5e181936709ad27843c9889c5897c4d724b1ee65"
+  }
+}
