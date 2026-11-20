@@ -876,6 +876,7 @@ class GPCPolicy(BasePolicy):
         transform = None,
         action_policy=None,
         execute_first_candidate: bool = False,
+        goal_mode: str = "final_goal",
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -900,6 +901,11 @@ class GPCPolicy(BasePolicy):
 
         self.num_candidates = num_candidates
         self.execute_first_candidate = execute_first_candidate
+        if goal_mode not in ("final_goal", "current_observation"):
+            raise ValueError(
+                f"goal_mode must be 'final_goal' or 'current_observation', got {goal_mode!r}"
+            )
+        self.goal_mode = goal_mode
         self.best_idx = None
         self.selected_candidate_index = None
 
@@ -941,7 +947,12 @@ class GPCPolicy(BasePolicy):
                     (B, K, T_pred, latent_dim)
         """
 
-        wm_info = dict(info_dict)
+        if self.goal_mode == "current_observation":
+            wm_info = {
+                k: v for k, v in info_dict.items() if k != "goal" and not k.startswith("goal_")
+            }
+        else:
+            wm_info = dict(info_dict)
         wm_info = self._prepare_info(wm_info)
 
         B, K, T, D = action_sequences.shape
@@ -963,10 +974,20 @@ class GPCPolicy(BasePolicy):
 
         action_sequences = action_sequences.to(device)
 
-        goal_emb = self.encode_goal(info_dict)
+        if self.goal_mode == "final_goal":
+            goal_emb = self.encode_goal(info_dict)
+        else:
+            # expand above repeats the same measured history for every candidate.
+            current = {k: wm_info[k][:, 0] for k in ("pixels", "wrist_pixels", "proprio")}
+            goal_emb = self.world_model.encode(current)["emb"][:, -1:]
 
         rollout_output = self.world_model.rollout(wm_info, action_sequences,)
-        
+        if self.goal_mode == "current_observation" and goal_emb.shape != (
+            B, 1, rollout_output["predicted_emb"].shape[-1]
+        ):
+            raise ValueError("Expected a current observation latent (B,1,D) matching the WM prediction")
+
+        # The reward API calls the shared comparison target "goal_emb" in both modes.
         rollout_output["goal_emb"] = goal_emb
 
         return rollout_output
